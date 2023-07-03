@@ -27,7 +27,9 @@ async def get_rows_count(client: ChClient, team_id: int, interval_start: str, in
     data_interval_end_ch = datetime.fromisoformat(interval_end).strftime("%Y-%m-%d %H:%M:%S")
 
     row = await client.fetchrow(
-        SELECT_QUERY_TEMPLATE.substitute(fields="count(*) as count", order_by=""),
+        SELECT_QUERY_TEMPLATE.substitute(
+            fields="count(DISTINCT event, cityHash64(distinct_id), cityHash64(uuid)) as count", order_by=""
+        ),
         params={
             "team_id": team_id,
             "data_interval_start": data_interval_start_ch,
@@ -36,6 +38,7 @@ async def get_rows_count(client: ChClient, team_id: int, interval_start: str, in
     )
 
     if row is None:
+        print(row)
         raise ValueError("Unexpected result from ClickHouse: `None` returned for count query")
 
     return row["count"]
@@ -48,6 +51,7 @@ async def get_results_iterator(client: ChClient, team_id: int, interval_start: s
     async for row in client.iterate(
         SELECT_QUERY_TEMPLATE.safe_substitute(
             fields="""
+                    DISTINCT ON (event, cityHash64(distinct_id), cityHash64(uuid))
                     uuid,
                     timestamp,
                     _timestamp,
