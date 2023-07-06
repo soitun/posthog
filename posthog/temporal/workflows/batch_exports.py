@@ -40,7 +40,7 @@ async def get_rows_count(client: ChClient, team_id: int, interval_start: str, in
     if row is None:
         raise ValueError("Unexpected result from ClickHouse: `None` returned for count query")
 
-    return sum(int(row["count"]) for row in rows)
+    return int(row["count"])
 
 
 async def get_results_iterator(client: ChClient, team_id: int, interval_start: str, interval_end: str):
