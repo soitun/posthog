@@ -25,7 +25,6 @@ import {
     Group,
     GroupKey,
     GroupTypeIndex,
-    GroupTypeToColumnIndex,
     InternalPerson,
     OrganizationMembershipLevel,
     PersonDistinctId,
@@ -156,9 +155,6 @@ export class DB {
     kafkaProducer: KafkaProducerWrapper
     /** ClickHouse used for syncing Postgres and ClickHouse person data. */
     clickhouse: ClickHouse
-
-    /** How many unique group types to allow per team */
-    MAX_GROUP_TYPES_PER_TEAM = 5
 
     /** Default log level for plugins that don't specify it */
     pluginsDefaultLogLevel: PluginLogLevel
@@ -645,13 +641,20 @@ export class DB {
         isUserId: number | null,
         isIdentified: boolean,
         uuid: string,
-        distinctIds?: string[],
-        version = 0
+        distinctIds?: { distinctId: string; version?: number }[],
+        tx?: TransactionClient
     ): Promise<InternalPerson> {
         distinctIds ||= []
 
+        for (const distinctId of distinctIds) {
+            distinctId.version ||= 0
+        }
+
+        // The Person is being created, and so we can hardcode version 0!
+        const personVersion = 0
+
         const { rows } = await this.postgres.query<RawPerson>(
-            PostgresUse.COMMON_WRITE,
+            tx ?? PostgresUse.COMMON_WRITE,
             `WITH inserted_person AS (
                     INSERT INTO posthog_person (
                         created_at, properties, properties_last_updated_at,
@@ -666,7 +669,12 @@ export class DB {
                         // `addDistinctIdPooled`
                         (_, index) => `, distinct_id_${index} AS (
                         INSERT INTO posthog_persondistinctid (distinct_id, person_id, team_id, version)
-                        VALUES ($${10 + index}, (SELECT id FROM inserted_person), $5, $9))`
+                        VALUES (
+                            $${11 + index + distinctIds!.length - 1},
+                            (SELECT id FROM inserted_person),
+                            $5,
+                            $${10 + index})
+                        )`
                     )
                     .join('') +
                 `SELECT * FROM inserted_person;`,
@@ -679,14 +687,21 @@ export class DB {
                 isUserId,
                 isIdentified,
                 uuid,
-                version,
+                personVersion,
                 // The copy and reverse here is to maintain compatability with pre-existing code
                 // and tests. Postgres appears to assign IDs in reverse order of the INSERTs in the
                 // CTEs above, so we need to reverse the distinctIds to match the old behavior where
                 // we would do a round trip for each INSERT. We shouldn't actually depend on the
                 // `id` column of distinct_ids, so this is just a simple way to keeps tests exactly
                 // the same and prove behavior is the same as before.
-                ...distinctIds.slice().reverse(),
+                ...distinctIds
+                    .slice()
+                    .reverse()
+                    .map(({ version }) => version),
+                ...distinctIds
+                    .slice()
+                    .reverse()
+                    .map(({ distinctId }) => distinctId),
             ],
             'insertPerson'
         )
@@ -702,8 +717,8 @@ export class DB {
                         value: JSON.stringify({
                             person_id: person.uuid,
                             team_id: teamId,
-                            distinct_id: distinctId,
-                            version,
+                            distinct_id: distinctId.distinctId,
+                            version: distinctId.version,
                             is_deleted: 0,
                         }),
                     },
@@ -721,6 +736,12 @@ export class DB {
         update: Partial<InternalPerson>,
         tx?: TransactionClient
     ): Promise<[InternalPerson, ProducerRecord[]]> {
+        let versionString = 'COALESCE(version, 0)::numeric + 1'
+        if (update.version) {
+            versionString = update.version.toString()
+            delete update['version']
+        }
+
         const updateValues = Object.values(unparsePersonPartial(update))
 
         // short circuit if there are no updates to be made
@@ -731,11 +752,9 @@ export class DB {
         const values = [...updateValues, person.id].map(sanitizeJsonbValue)
 
         // Potentially overriding values badly if there was an update to the person after computing updateValues above
-        const queryString = `UPDATE posthog_person SET version = COALESCE(version, 0)::numeric + 1, ${Object.keys(
-            update
-        ).map((field, index) => `"${sanitizeSqlIdentifier(field)}" = $${index + 1}`)} WHERE id = $${
-            Object.values(update).length + 1
-        }
+        const queryString = `UPDATE posthog_person SET version = ${versionString}, ${Object.keys(update).map(
+            (field, index) => `"${sanitizeSqlIdentifier(field)}" = $${index + 1}`
+        )} WHERE id = $${Object.values(update).length + 1}
         RETURNING *`
 
         const { rows } = await this.postgres.query<RawPerson>(
@@ -758,20 +777,14 @@ export class DB {
             personUpdateVersionMismatchCounter.inc()
         }
 
-        const kafkaMessages = []
-        const message = generateKafkaPersonUpdateMessage(updatedPerson)
-        if (tx) {
-            kafkaMessages.push(message)
-        } else {
-            await this.kafkaProducer.queueMessage({ kafkaMessage: message, waitForAck: true })
-        }
+        const kafkaMessage = generateKafkaPersonUpdateMessage(updatedPerson)
 
         status.debug(
             '🧑‍🦰',
             `Updated person ${updatedPerson.uuid} of team ${updatedPerson.team_id} to version ${updatedPerson.version}.`
         )
 
-        return [updatedPerson, kafkaMessages]
+        return [updatedPerson, [kafkaMessage]]
     }
 
     public async deletePerson(person: InternalPerson, tx?: TransactionClient): Promise<ProducerRecord[]> {
@@ -836,8 +849,66 @@ export class DB {
         return personDistinctIds.map((pdi) => pdi.distinct_id)
     }
 
-    public async addDistinctId(person: InternalPerson, distinctId: string, version: number): Promise<void> {
-        const kafkaMessages = await this.addDistinctIdPooled(person, distinctId, version)
+    public async addPersonlessDistinctId(teamId: number, distinctId: string): Promise<boolean> {
+        const result = await this.postgres.query(
+            PostgresUse.COMMON_WRITE,
+            `
+                INSERT INTO posthog_personlessdistinctid (team_id, distinct_id, is_merged, created_at)
+                VALUES ($1, $2, false, now())
+                ON CONFLICT (team_id, distinct_id) DO NOTHING
+                RETURNING is_merged
+            `,
+            [teamId, distinctId],
+            'addPersonlessDistinctId'
+        )
+
+        if (result.rows.length === 1) {
+            return result.rows[0]['is_merged']
+        }
+
+        // ON CONFLICT ... DO NOTHING won't give us our RETURNING, so we have to do another SELECT
+        const existingResult = await this.postgres.query(
+            PostgresUse.COMMON_WRITE,
+            `
+                SELECT is_merged
+                FROM posthog_personlessdistinctid
+                WHERE team_id = $1 AND distinct_id = $2
+            `,
+            [teamId, distinctId],
+            'addPersonlessDistinctId'
+        )
+
+        return existingResult.rows[0]['is_merged']
+    }
+
+    public async addPersonlessDistinctIdForMerge(
+        teamId: number,
+        distinctId: string,
+        tx?: TransactionClient
+    ): Promise<boolean> {
+        const result = await this.postgres.query(
+            tx ?? PostgresUse.COMMON_WRITE,
+            `
+                INSERT INTO posthog_personlessdistinctid (team_id, distinct_id, is_merged, created_at)
+                VALUES ($1, $2, true, now())
+                ON CONFLICT (team_id, distinct_id) DO UPDATE
+                SET is_merged = true
+                RETURNING (xmax = 0) AS inserted
+            `,
+            [teamId, distinctId],
+            'addPersonlessDistinctIdForMerge'
+        )
+
+        return result.rows[0].inserted
+    }
+
+    public async addDistinctId(
+        person: InternalPerson,
+        distinctId: string,
+        version: number,
+        tx?: TransactionClient
+    ): Promise<void> {
+        const kafkaMessages = await this.addDistinctIdPooled(person, distinctId, version, tx)
         if (kafkaMessages.length) {
             await this.kafkaProducer.queueMessages({ kafkaMessages, waitForAck: true })
         }
@@ -1257,58 +1328,6 @@ export class DB {
             [id, user_id, label, secure_value, created_at.toISOString()],
             'createPersonalApiKey'
         )
-    }
-
-    public async fetchGroupTypes(teamId: TeamId): Promise<GroupTypeToColumnIndex> {
-        const { rows } = await this.postgres.query(
-            PostgresUse.COMMON_WRITE,
-            `SELECT * FROM posthog_grouptypemapping WHERE team_id = $1`,
-            [teamId],
-            'fetchGroupTypes'
-        )
-
-        const result: GroupTypeToColumnIndex = {}
-
-        for (const row of rows) {
-            result[row.group_type] = row.group_type_index
-        }
-
-        return result
-    }
-
-    public async insertGroupType(
-        teamId: TeamId,
-        groupType: string,
-        index: number
-    ): Promise<[GroupTypeIndex | null, boolean]> {
-        if (index >= this.MAX_GROUP_TYPES_PER_TEAM) {
-            return [null, false]
-        }
-
-        const insertGroupTypeResult = await this.postgres.query(
-            PostgresUse.COMMON_WRITE,
-            `
-            WITH insert_result AS (
-                INSERT INTO posthog_grouptypemapping (team_id, group_type, group_type_index)
-                VALUES ($1, $2, $3)
-                ON CONFLICT DO NOTHING
-                RETURNING group_type_index
-            )
-            SELECT group_type_index, 1 AS is_insert  FROM insert_result
-            UNION
-            SELECT group_type_index, 0 AS is_insert FROM posthog_grouptypemapping WHERE team_id = $1 AND group_type = $2;
-            `,
-            [teamId, groupType, index],
-            'insertGroupType'
-        )
-
-        if (insertGroupTypeResult.rows.length == 0) {
-            return await this.insertGroupType(teamId, groupType, index + 1)
-        }
-
-        const { group_type_index, is_insert } = insertGroupTypeResult.rows[0]
-
-        return [group_type_index, is_insert === 1]
     }
 
     public async fetchGroup(

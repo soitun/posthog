@@ -3,14 +3,13 @@ import { urlToAction } from 'kea-router'
 import { FEATURE_FLAGS } from 'lib/constants'
 import { LemonTag } from 'lib/lemon-ui/LemonTag/LemonTag'
 import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
+import { identifierToHuman } from 'lib/utils'
 import { insightDataLogic, queryFromKind } from 'scenes/insights/insightDataLogic'
-import { insightLogic } from 'scenes/insights/insightLogic'
 import { keyForInsightLogicProps } from 'scenes/insights/sharedUtils'
 import { filterTestAccountsDefaultsLogic } from 'scenes/settings/project/filterTestAccountDefaultsLogic'
 
 import { examples, TotalEventsTable } from '~/queries/examples'
 import { insightMap } from '~/queries/nodes/InsightQuery/utils/queryNodeToFilter'
-import { getDisplay, getShowPercentStackView, getShowValuesOnSeries } from '~/queries/nodes/InsightViz/utils'
 import {
     ActionsNode,
     DataWarehouseNode,
@@ -34,6 +33,10 @@ import {
 import {
     containsHogQLQuery,
     filterKeyForQuery,
+    getDisplay,
+    getShowPercentStackView,
+    getShowValuesOnSeries,
+    isHogQuery,
     isInsightQueryWithBreakdown,
     isInsightQueryWithSeries,
     isInsightVizNode,
@@ -64,11 +67,11 @@ export interface CommonInsightFilter
 
 export interface QueryPropertyCache
     extends Omit<Partial<TrendsQuery>, 'kind' | 'response'>,
-        Omit<Partial<FunnelsQuery>, 'kind'>,
+        Omit<Partial<FunnelsQuery>, 'kind' | 'response'>,
         Omit<Partial<RetentionQuery>, 'kind' | 'response'>,
-        Omit<Partial<PathsQuery>, 'kind'>,
-        Omit<Partial<StickinessQuery>, 'kind'>,
-        Omit<Partial<LifecycleQuery>, 'kind'> {
+        Omit<Partial<PathsQuery>, 'kind' | 'response'>,
+        Omit<Partial<StickinessQuery>, 'kind' | 'response'>,
+        Omit<Partial<LifecycleQuery>, 'kind' | 'response'> {
     commonFilter: CommonInsightFilter
 }
 
@@ -105,8 +108,6 @@ export const insightNavLogic = kea<insightNavLogicType>([
     path((key) => ['scenes', 'insights', 'InsightNav', 'insightNavLogic', key]),
     connect((props: InsightLogicProps) => ({
         values: [
-            insightLogic(props),
-            ['filters'],
             featureFlagLogic,
             ['featureFlags'],
             insightDataLogic(props),
@@ -130,40 +131,24 @@ export const insightNavLogic = kea<insightNavLogicType>([
                 }),
             },
         ],
-        userSelectedView: [
-            null as InsightType | null,
-            {
-                setActiveView: (_, { view }) => view,
-            },
-        ],
     }),
     selectors({
         activeView: [
-            (s) => [s.filters, s.query, s.userSelectedView],
-            (filters, query, userSelectedView) => {
-                // if userSelectedView is null then we must be loading an insight
-                // and, we can prefer a present query over a present filter
-                // otherwise we can have both a filter and a query and without userSelectedView we don't know which to use
-                // so, if there is a user selected view, we use that
-                // this gets much simpler once everything is using queries
-
-                if (userSelectedView === null) {
-                    if (query) {
-                        if (containsHogQLQuery(query)) {
-                            return InsightType.SQL
-                        } else if (isInsightVizNode(query)) {
-                            return insightMap[query.source.kind] || InsightType.TRENDS
-                        }
-                        return InsightType.JSON
-                    }
-                    return filters.insight || InsightType.TRENDS
+            (s) => [s.query],
+            (query) => {
+                if (containsHogQLQuery(query)) {
+                    return InsightType.SQL
+                } else if (isHogQuery(query)) {
+                    return InsightType.HOG
+                } else if (isInsightVizNode(query)) {
+                    return insightMap[query.source.kind] || InsightType.TRENDS
                 }
-                return userSelectedView
+                return InsightType.JSON
             },
         ],
         tabs: [
-            (s) => [s.activeView],
-            (activeView) => {
+            (s) => [s.activeView, s.query, s.featureFlags],
+            (activeView, query, featureFlags) => {
                 const tabs: Tab[] = [
                     {
                         label: 'Trends',
@@ -195,29 +180,40 @@ export const insightNavLogic = kea<insightNavLogicType>([
                         type: InsightType.LIFECYCLE,
                         dataAttr: 'insight-lifecycle-tab',
                     },
+                    {
+                        label: (
+                            <>
+                                SQL
+                                <LemonTag type="warning" className="uppercase ml-2">
+                                    Beta
+                                </LemonTag>
+                            </>
+                        ),
+                        type: InsightType.SQL,
+                        dataAttr: 'insight-sql-tab',
+                    },
                 ]
 
-                tabs.push({
-                    label: (
-                        <>
-                            SQL
-                            <LemonTag type="warning" className="uppercase ml-2">
-                                Beta
-                            </LemonTag>
-                        </>
-                    ),
-                    type: InsightType.SQL,
-                    dataAttr: 'insight-sql-tab',
-                })
+                if (featureFlags[FEATURE_FLAGS.HOG] || activeView === InsightType.HOG) {
+                    tabs.push({
+                        label: <>Hog 🦔</>,
+                        type: InsightType.HOG,
+                        dataAttr: 'insight-hog-tab',
+                    })
+                }
 
                 if (activeView === InsightType.JSON) {
                     // only display this tab when it is selected by the provided insight query
                     // don't display it otherwise... humans shouldn't be able to click to select this tab
                     // it only opens when you click the <OpenEditorButton/>
+                    const humanFriendlyQueryKind: string | null =
+                        typeof query?.kind === 'string'
+                            ? identifierToHuman(query.kind.replace(/(Node|Query)$/g, ''), 'title')
+                            : null
                     tabs.push({
                         label: (
                             <>
-                                Custom{' '}
+                                {humanFriendlyQueryKind ?? 'Custom'}{' '}
                                 <LemonTag type="warning" className="uppercase ml-2">
                                     Beta
                                 </LemonTag>
@@ -234,14 +230,15 @@ export const insightNavLogic = kea<insightNavLogicType>([
     }),
     listeners(({ values, actions }) => ({
         setActiveView: ({ view }) => {
-            if ([InsightType.SQL, InsightType.JSON].includes(view as InsightType)) {
+            if ([InsightType.SQL, InsightType.JSON, InsightType.HOG].includes(view as InsightType)) {
                 // if the selected view is SQL or JSON then we must have the "allow queries" flag on,
                 // so no need to check it
                 if (view === InsightType.JSON) {
                     actions.setQuery(TotalEventsTable)
                 } else if (view === InsightType.SQL) {
-                    const biVizFlag = Boolean(values.featureFlags[FEATURE_FLAGS.BI_VIZ])
-                    actions.setQuery(biVizFlag ? examples.DataVisualization : examples.HogQLTable)
+                    actions.setQuery(examples.DataVisualization)
+                } else if (view === InsightType.HOG) {
+                    actions.setQuery(examples.Hoggonacci)
                 }
             } else {
                 let query: InsightVizNode
@@ -374,7 +371,12 @@ const mergeCachedProperties = (query: InsightQueryNode, cache: QueryPropertyCach
 
     // interval
     if (isInsightQueryWithSeries(mergedQuery) && cache.interval) {
-        mergedQuery.interval = cache.interval
+        // Only support real time queries on trends for now
+        if (!isTrendsQuery(mergedQuery) && cache.interval == 'minute') {
+            mergedQuery.interval = 'hour'
+        } else {
+            mergedQuery.interval = cache.interval
+        }
     }
 
     // breakdown filter

@@ -797,14 +797,14 @@ export const dateMapping: DateMappingOption[] = [
     {
         key: 'This month',
         values: ['mStart'],
-        getFormattedDate: (date: dayjs.Dayjs): string => formatDateRange(date.startOf('m'), date.endOf('d')),
+        getFormattedDate: (date: dayjs.Dayjs): string => formatDateRange(date.startOf('month'), date.endOf('month')),
         defaultInterval: 'day',
     },
     {
         key: 'Previous month',
         values: ['-1mStart', '-1mEnd'],
         getFormattedDate: (date: dayjs.Dayjs): string =>
-            formatDateRange(date.subtract(1, 'm').startOf('M'), date.subtract(1, 'm').endOf('M')),
+            formatDateRange(date.subtract(1, 'month').startOf('month'), date.subtract(1, 'month').endOf('month')),
         inactive: true,
         defaultInterval: 'day',
     },
@@ -911,6 +911,16 @@ export function dateFilterToText(
     }
 
     return defaultValue
+}
+
+// Converts a dateFrom string ("-2w") into english: "2 weeks"
+export function dateFromToText(dateFrom: string): string | undefined {
+    const dateOption: (typeof dateOptionsMap)[keyof typeof dateOptionsMap] = dateOptionsMap[dateFrom.slice(-1)]
+    const counter = parseInt(dateFrom.slice(1, -1))
+    if (dateOption && counter) {
+        return `${counter} ${dateOption}${counter > 1 ? 's' : ''}`
+    }
+    return undefined
 }
 
 export function dateStringToComponents(date: string | null): {
@@ -1055,11 +1065,17 @@ export const areDatesValidForInterval = (
             parsedOldDateTo.diff(parsedOldDateFrom, 'hour') >= 2 &&
             parsedOldDateTo.diff(parsedOldDateFrom, 'hour') < 24 * 7 * 2 // 2 weeks
         )
+    } else if (interval === 'minute') {
+        return (
+            parsedOldDateTo.diff(parsedOldDateFrom, 'minute') >= 2 &&
+            parsedOldDateTo.diff(parsedOldDateFrom, 'minute') < 60 * 12 // 12 hours. picked based on max graph resolution
+        )
     }
     throw new UnexpectedNeverError(interval)
 }
 
 const defaultDatesForInterval = {
+    minute: { dateFrom: '-1h', dateTo: null },
     hour: { dateFrom: '-24h', dateTo: null },
     day: { dateFrom: '-7d', dateTo: null },
     week: { dateFrom: '-28d', dateTo: null },
@@ -1078,6 +1094,19 @@ export const updateDatesWithInterval = (
         }
     }
     return defaultDatesForInterval[interval]
+}
+
+export function is12HoursOrLess(dateFrom: string | undefined | null): boolean {
+    if (!dateFrom) {
+        return false
+    }
+    return dateFrom.search(/^-([0-9]|1[0-2])h$/) != -1
+}
+export function isLessThan2Days(dateFrom: string | undefined | null): boolean {
+    if (!dateFrom) {
+        return false
+    }
+    return dateFrom.search(/^-(4[0-7]|[0-3]?[0-9])h|[1-2]d$/) != -1
 }
 
 export function clamp(value: number, min: number, max: number): number {
@@ -1645,10 +1674,17 @@ export function inStorybookTestRunner(): boolean {
     return navigator.userAgent.includes('StorybookTestRunner')
 }
 
+/** We issue a cancel request, when the request is aborted or times out (frontend side), since in these cases the backend query might still be running. */
 export function shouldCancelQuery(error: any): boolean {
-    // We cancel queries "manually" when the request times out or is aborted since in these cases
-    // the query will continue running in ClickHouse
-    return error.name === 'AbortError' || error.message?.name === 'AbortError' || error.status === 504
+    return isAbortedRequest(error) || isTimedOutRequest(error)
+}
+
+export function isAbortedRequest(error: any): boolean {
+    return error.name === 'AbortError' || error.message?.name === 'AbortError'
+}
+
+export function isTimedOutRequest(error: any): boolean {
+    return error.status === 504
 }
 
 export function flattenObject(ob: Record<string, any>): Record<string, any> {
@@ -1722,4 +1758,15 @@ export function hasFormErrors(object: any): boolean {
         return Object.values(object).some(hasFormErrors)
     }
     return !!object
+}
+
+export function debounce<F extends (...args: Parameters<F>) => ReturnType<F>>(
+    func: F,
+    waitFor: number
+): (...args: Parameters<F>) => void {
+    let timeout: ReturnType<typeof setTimeout>
+    return (...args: Parameters<F>): void => {
+        clearTimeout(timeout)
+        timeout = setTimeout(() => func(...args), waitFor)
+    }
 }

@@ -11,7 +11,7 @@ import {
     isOtherBreakdown,
 } from 'scenes/insights/utils'
 
-import { EntityNode, LifecycleQuery } from '~/queries/schema'
+import { LifecycleQuery, MathType, TrendsFilter } from '~/queries/schema'
 import {
     ChartDisplayType,
     CountPerActorMathType,
@@ -25,8 +25,6 @@ import {
 
 import type { trendsDataLogicType } from './trendsDataLogicType'
 import { IndexedTrendResult } from './types'
-
-type MathType = Required<EntityNode>['math']
 
 /** All math types that can result in non-whole numbers. */
 const POSSIBLY_FRACTIONAL_MATH_TYPES: Set<MathType> = new Set(
@@ -50,15 +48,17 @@ export const trendsDataLogic = kea<trendsDataLogicType>([
                 'series',
                 'formula',
                 'display',
-                'compare',
+                'compareFilter',
                 'interval',
                 'breakdownFilter',
                 'showValuesOnSeries',
                 'showLabelOnSeries',
                 'showPercentStackView',
                 'supportsPercentStackView',
+                'insightFilter',
                 'trendsFilter',
                 'lifecycleFilter',
+                'stickinessFilter',
                 'isTrends',
                 'isDataWarehouseSeries',
                 'isLifecycle',
@@ -68,14 +68,19 @@ export const trendsDataLogic = kea<trendsDataLogicType>([
                 'hasLegend',
                 'showLegend',
                 'vizSpecificOptions',
+                'yAxisScaleType',
             ],
         ],
-        actions: [insightVizDataLogic(props), ['setInsightData', 'updateInsightFilter', 'updateBreakdownFilter']],
+        actions: [
+            insightVizDataLogic(props),
+            ['setInsightData', 'updateInsightFilter', 'updateBreakdownFilter', 'updateHiddenLegendIndexes'],
+        ],
     })),
 
     actions({
         loadMoreBreakdownValues: true,
         setBreakdownValuesLoading: (loading: boolean) => ({ loading }),
+        toggleHiddenLegendIndex: (index: number) => ({ index }),
     }),
 
     reducers({
@@ -125,13 +130,21 @@ export const trendsDataLogic = kea<trendsDataLogicType>([
                     display &&
                     (display === ChartDisplayType.ActionsBarValue || display === ChartDisplayType.ActionsPie)
                 ) {
-                    indexedResults.sort((a, b) =>
-                        a.breakdown_value === BREAKDOWN_OTHER_STRING_LABEL
-                            ? BREAKDOWN_OTHER_NUMERIC_LABEL
-                            : a.breakdown_value === BREAKDOWN_NULL_STRING_LABEL
-                            ? BREAKDOWN_NULL_NUMERIC_LABEL
-                            : b.aggregated_value - a.aggregated_value
-                    )
+                    indexedResults.sort((a, b) => {
+                        const aValue =
+                            a.breakdown_value === BREAKDOWN_OTHER_STRING_LABEL
+                                ? -BREAKDOWN_OTHER_NUMERIC_LABEL
+                                : a.breakdown_value === BREAKDOWN_NULL_STRING_LABEL
+                                ? -BREAKDOWN_NULL_NUMERIC_LABEL
+                                : a.aggregated_value
+                        const bValue =
+                            b.breakdown_value === BREAKDOWN_OTHER_STRING_LABEL
+                                ? -BREAKDOWN_OTHER_NUMERIC_LABEL
+                                : b.breakdown_value === BREAKDOWN_NULL_STRING_LABEL
+                                ? -BREAKDOWN_NULL_NUMERIC_LABEL
+                                : b.aggregated_value
+                        return bValue - aValue
+                    })
                 } else if (lifecycleFilter) {
                     if (lifecycleFilter.toggledLifecycles) {
                         indexedResults = indexedResults.filter((result) =>
@@ -207,9 +220,28 @@ export const trendsDataLogic = kea<trendsDataLogicType>([
                 return false
             },
         ],
+
+        hiddenLegendIndexes: [
+            (s) => [s.trendsFilter, s.stickinessFilter],
+            (trendsFilter, stickinessFilter): number[] => {
+                return trendsFilter?.hiddenLegendIndexes || stickinessFilter?.hiddenLegendIndexes || []
+            },
+        ],
     })),
 
     listeners(({ actions, values }) => ({
+        toggleHiddenLegendIndex: ({ index }) => {
+            if ((values.insightFilter as TrendsFilter)?.hiddenLegendIndexes?.includes(index)) {
+                actions.updateHiddenLegendIndexes(
+                    (values.insightFilter as TrendsFilter).hiddenLegendIndexes?.filter((idx) => idx !== index)
+                )
+            } else {
+                actions.updateHiddenLegendIndexes([
+                    ...((values.insightFilter as TrendsFilter)?.hiddenLegendIndexes || []),
+                    index,
+                ])
+            }
+        },
         loadMoreBreakdownValues: async () => {
             if (!values.loadMoreBreakdownUrl) {
                 return

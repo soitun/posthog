@@ -44,6 +44,7 @@
          "posthog_team"."recording_domains",
          "posthog_team"."primary_dashboard_id",
          "posthog_team"."extra_settings",
+         "posthog_team"."modifiers",
          "posthog_team"."correlation_config",
          "posthog_team"."session_recording_retention_period_days",
          "posthog_team"."plugins_opt_in",
@@ -105,6 +106,7 @@
          "posthog_team"."recording_domains",
          "posthog_team"."primary_dashboard_id",
          "posthog_team"."extra_settings",
+         "posthog_team"."modifiers",
          "posthog_team"."correlation_config",
          "posthog_team"."session_recording_retention_period_days",
          "posthog_team"."plugins_opt_in",
@@ -166,6 +168,7 @@
          "posthog_team"."recording_domains",
          "posthog_team"."primary_dashboard_id",
          "posthog_team"."extra_settings",
+         "posthog_team"."modifiers",
          "posthog_team"."correlation_config",
          "posthog_team"."session_recording_retention_period_days",
          "posthog_team"."plugins_opt_in",
@@ -227,6 +230,7 @@
          "posthog_team"."recording_domains",
          "posthog_team"."primary_dashboard_id",
          "posthog_team"."extra_settings",
+         "posthog_team"."modifiers",
          "posthog_team"."correlation_config",
          "posthog_team"."session_recording_retention_period_days",
          "posthog_team"."plugins_opt_in",
@@ -288,6 +292,7 @@
          "posthog_team"."recording_domains",
          "posthog_team"."primary_dashboard_id",
          "posthog_team"."extra_settings",
+         "posthog_team"."modifiers",
          "posthog_team"."correlation_config",
          "posthog_team"."session_recording_retention_period_days",
          "posthog_team"."plugins_opt_in",
@@ -347,16 +352,6 @@
   SELECT "posthog_person"."uuid"
   FROM "posthog_person"
   WHERE (UPPER(("posthog_person"."properties" ->> '$key')::text) LIKE UPPER('%red%')
-         AND "posthog_person"."properties" ? '$key'
-         AND NOT (("posthog_person"."properties" -> '$key') = 'null'::jsonb)
-         AND "posthog_person"."team_id" = 2)
-  '''
-# ---
-# name: TestDjangoPropertiesToQ.test_icontains_with_array_value.2
-  '''
-  SELECT "posthog_person"."uuid"
-  FROM "posthog_person"
-  WHERE (("posthog_person"."properties" -> '$key') > '["2"]'::jsonb
          AND "posthog_person"."properties" ? '$key'
          AND NOT (("posthog_person"."properties" -> '$key') = 'null'::jsonb)
          AND "posthog_person"."team_id" = 2)
