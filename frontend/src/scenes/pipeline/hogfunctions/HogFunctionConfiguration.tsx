@@ -207,7 +207,7 @@ export function HogFunctionConfiguration({
     const showOverview = !(displayOptions.hideOverview ?? false)
     const showFilters =
         displayOptions.showFilters ??
-        (['destination', 'internal_destination', 'site_destination', 'broadcast'].includes(type) ||
+        (['destination', 'internal_destination', 'site_destination', 'broadcast', 'email'].includes(type) ||
             (type === 'transformation' && showTransformationFilters))
     const showExpectedVolume =
         displayOptions.showExpectedVolume ??
@@ -216,9 +216,15 @@ export function HogFunctionConfiguration({
         displayOptions.showStatus ?? ['destination', 'internal_destination', 'email', 'transformation'].includes(type)
     const showEnabled =
         displayOptions.showEnabled ??
-        ['destination', 'internal_destination', 'email', 'site_destination', 'site_app', 'transformation'].includes(
-            type
-        )
+        [
+            'destination',
+            'internal_destination',
+            'email',
+            'site_destination',
+            'site_app',
+            'transformation',
+            'broadcast',
+        ].includes(type)
     const canEditSource =
         displayOptions.canEditSource ??
         // Never allow editing for legacy plugins
@@ -405,6 +411,15 @@ export function HogFunctionConfiguration({
                         )}
 
                         <div className="deprecated-space-y-4 flex-2 min-w-100">
+                            {type === 'transformation' && mightDrop && (
+                                <div>
+                                    <LemonBanner type="warning">
+                                        <b>Warning:</b> This transformation will drop events. If this is not intended,
+                                        please adjust your transformation code to return events instead of dropping
+                                        them.
+                                    </LemonBanner>
+                                </div>
+                            )}
                             <div
                                 className={clsx(
                                     'p-3 deprecated-space-y-2 bg-surface-primary',
@@ -564,8 +579,8 @@ export function HogFunctionConfiguration({
                                                 <div>
                                                     <strong>Please note:</strong> Clicking the button above will
                                                     synchronously send to all the e-mails. While this is fine for
-                                                    testing with small lists, please don't use this for production
-                                                    usecases yet.
+                                                    testing with small lists, please don't use this for production use
+                                                    cases yet.
                                                 </div>
                                             </div>
                                         ) : (

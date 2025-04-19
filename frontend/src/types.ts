@@ -203,6 +203,7 @@ export enum ProductKey {
     TEAMS = 'teams',
     WEB_ANALYTICS = 'web_analytics',
     ERROR_TRACKING = 'error_tracking',
+    REVENUE_ANALYTICS = 'revenue_analytics',
 }
 
 type ProductKeyUnion = `${ProductKey}`
@@ -253,7 +254,7 @@ export interface ColumnConfig {
 }
 
 export type WithAccessControl = {
-    user_access_level: 'none' | 'member' | 'admin' | 'viewer' | 'editor'
+    user_access_level: AccessControlLevel
 }
 
 export enum AccessControlResourceType {
@@ -578,6 +579,7 @@ export interface TeamType extends TeamBasicType {
     session_recording_url_trigger_config?: SessionReplayUrlTriggerConfig[]
     session_recording_url_blocklist_config?: SessionReplayUrlTriggerConfig[]
     session_recording_event_trigger_config?: string[]
+    session_recording_trigger_match_type_config?: 'all' | 'any' | null
     surveys_opt_in?: boolean
     heatmaps_opt_in?: boolean
     autocapture_exceptions_errors_to_ignore: string[]
@@ -589,6 +591,7 @@ export interface TeamType extends TeamBasicType {
     data_attributes: string[]
     person_display_name_properties: string[]
     has_group_types: boolean
+    group_types: GroupType[]
     primary_dashboard: number // Dashboard shown on the project homepage
     live_events_columns: string[] | null // Custom columns shown on the Live Events page
     live_events_token: string
@@ -1906,6 +1909,7 @@ export interface DashboardTile<T = InsightModel> extends Tileable {
     text?: TextModel
     deleted?: boolean
     is_cached?: boolean
+    order?: number
 }
 
 export interface DashboardTileBasicType {
@@ -2266,6 +2270,7 @@ export type BreakdownType =
     | 'cohort'
     | 'person'
     | 'event'
+    | 'event_metadata'
     | 'group'
     | 'session'
     | 'hogql'
@@ -2418,6 +2423,7 @@ export interface TrendsFilterType extends FilterType {
     aggregation_axis_prefix?: string // a prefix to add to the aggregation axis e.g. £
     aggregation_axis_postfix?: string // a postfix to add to the aggregation axis e.g. %
     decimal_places?: number
+    min_decimal_places?: number
     show_values_on_series?: boolean
     show_labels_on_series?: boolean
     show_percent_stack_view?: boolean
@@ -2889,6 +2895,37 @@ export interface SurveyDisplayConditions {
     } | null
 }
 
+export interface SurveyStats {
+    stats: {
+        'survey shown': {
+            total_count: number
+            total_count_only_seen: number
+            unique_persons: number
+            unique_persons_only_seen: number
+            first_seen: string | null
+            last_seen: string | null
+        }
+        'survey dismissed': {
+            total_count: number
+            unique_persons: number
+            first_seen: string | null
+            last_seen: string | null
+        }
+        'survey sent': {
+            total_count: number
+            unique_persons: number
+            first_seen: string | null
+            last_seen: string | null
+        }
+    }
+    rates: {
+        response_rate: number
+        dismissal_rate: number
+        unique_users_response_rate: number
+        unique_users_dismissal_rate: number
+    }
+}
+
 export interface Survey {
     /** UUID */
     id: string
@@ -2934,10 +2971,23 @@ export enum SurveyMatchType {
 
 export enum SurveyType {
     Popover = 'popover',
-    Widget = 'widget',
+    Widget = 'widget', // feedback button survey
     FullScreen = 'full_screen',
     Email = 'email',
     API = 'api',
+}
+
+export enum SurveyPosition {
+    Left = 'left',
+    Center = 'center',
+    Right = 'right',
+    NextToTrigger = 'next_to_trigger',
+}
+
+export enum SurveyWidgetType {
+    Button = 'button',
+    Tab = 'tab',
+    Selector = 'selector',
 }
 
 export type SurveyQuestionDescriptionContentType = 'html' | 'text'
@@ -2959,12 +3009,12 @@ export interface SurveyAppearance {
     thankYouMessageDescriptionContentType?: SurveyQuestionDescriptionContentType
     thankYouMessageCloseButtonText?: string
     autoDisappear?: boolean
-    position?: string
+    position?: SurveyPosition
     zIndex?: string
     shuffleQuestions?: boolean
     surveyPopupDelaySeconds?: number
     // widget only
-    widgetType?: 'button' | 'tab' | 'selector'
+    widgetType?: SurveyWidgetType
     widgetSelector?: string
     widgetLabel?: string
     widgetColor?: string
@@ -3466,6 +3516,10 @@ export interface Experiment {
     saved_metrics_ids: { id: number; metadata: { type: 'primary' | 'secondary' } }[]
     saved_metrics: any[]
     parameters: {
+        exposure_estimate_config?: {
+            event: string
+            properties: AnyPropertyFilter[]
+        } | null
         minimum_detectable_effect?: number
         recommended_running_time?: number
         recommended_sample_size?: number
@@ -3573,6 +3627,7 @@ export interface AppContext {
     persisted_feature_flags?: string[]
     anonymous: boolean
     frontend_apps?: Record<number, FrontendAppConfig>
+    resource_access_control: Record<AccessControlResourceType, AccessControlLevel>
     commit_sha?: string
     /** Whether the user was autoswitched to the current item's team. */
     switched_team: TeamType['id'] | null
@@ -3885,6 +3940,7 @@ export type IntegrationKind =
     | 'snapchat'
     | 'intercom'
     | 'email'
+    | 'linear'
 
 export interface IntegrationType {
     id: number
@@ -3903,6 +3959,11 @@ export interface SlackChannelType {
     is_private: boolean
     is_ext_shared: boolean
     is_member: boolean
+    is_private_without_access?: boolean
+}
+export interface LinearTeamType {
+    id: string
+    name: string
 }
 
 export interface SharingConfigurationType {
@@ -4033,12 +4094,20 @@ export type APIScopeObject =
     | 'user'
     | 'webhook'
 
+export enum AccessControlLevel {
+    None = 'none',
+    Member = 'member',
+    Admin = 'admin',
+    Viewer = 'viewer',
+    Editor = 'editor',
+}
+
 export interface AccessControlTypeBase {
     created_by: UserBasicType | null
     created_at: string
     updated_at: string
     resource: APIScopeObject
-    access_level: string | null // TODO: Change to enum
+    access_level: AccessControlLevel | null
     organization_member?: OrganizationMemberType['id'] | null
     role?: RoleType['id'] | null
 }
@@ -4047,6 +4116,10 @@ export interface AccessControlTypeProject extends AccessControlTypeBase {}
 
 export interface AccessControlTypeMember extends AccessControlTypeBase {
     organization_member: OrganizationMemberType['id']
+}
+
+export interface AccessControlTypeOrganizationAdmins extends AccessControlTypeBase {
+    organization_admin_members: OrganizationMemberType['id'][]
 }
 
 export interface AccessControlTypeRole extends AccessControlTypeBase {
@@ -4061,9 +4134,9 @@ export type AccessControlUpdateType = Pick<AccessControlType, 'access_level' | '
 
 export type AccessControlResponseType = {
     access_controls: AccessControlType[]
-    available_access_levels: string[] // TODO: Change to enum
-    user_access_level: string
-    default_access_level: string
+    available_access_levels: AccessControlLevel[]
+    user_access_level: AccessControlLevel
+    default_access_level: AccessControlLevel
     user_can_edit_access_levels: boolean
 }
 
@@ -4813,7 +4886,8 @@ export type AvailableOnboardingProducts = Record<
     | ProductKey.EXPERIMENTS
     | ProductKey.SURVEYS
     | ProductKey.DATA_WAREHOUSE
-    | ProductKey.WEB_ANALYTICS,
+    | ProductKey.WEB_ANALYTICS
+    | ProductKey.ERROR_TRACKING,
     OnboardingProduct
 >
 
@@ -4914,11 +4988,13 @@ export type HogFunctionTypeType =
     | 'activity'
     | 'alert'
     | 'broadcast'
-    | 'automation'
+
+export type HogFunctionKind = 'messaging_campaign' | null
 
 export type HogFunctionType = {
     id: string
     type: HogFunctionTypeType
+    kind?: HogFunctionKind
     icon_url?: string
     name: string
     description: string
@@ -4960,7 +5036,17 @@ export type HogFunctionSubTemplateType = Pick<HogFunctionType, 'filters' | 'inpu
 
 export type HogFunctionTemplateType = Pick<
     HogFunctionType,
-    'id' | 'type' | 'name' | 'description' | 'hog' | 'inputs_schema' | 'filters' | 'icon_url' | 'masking' | 'mappings'
+    | 'id'
+    | 'type'
+    | 'kind'
+    | 'name'
+    | 'description'
+    | 'hog'
+    | 'inputs_schema'
+    | 'filters'
+    | 'icon_url'
+    | 'masking'
+    | 'mappings'
 > & {
     status: HogFunctionTemplateStatus
     free: boolean
