@@ -100,7 +100,11 @@ class PipelineNonDLT:
 
         try:
             # Reset the rows_synced count - this may not be 0 if the job restarted due to a heartbeat timeout
-            if self._job.rows_synced is not None and self._job.rows_synced != 0:
+            if (
+                self._job.rows_synced is not None
+                and self._job.rows_synced != 0
+                and (not self._is_incremental or self._reset_pipeline is True)
+            ):
                 self._job.rows_synced = 0
                 self._job.save()
 
@@ -196,6 +200,7 @@ class PipelineNonDLT:
             partition_count = self._schema.partition_count or self._resource.partition_count
             partition_size = self._schema.partition_size or self._resource.partition_size
             partition_keys = self._schema.partitioning_keys or self._resource.primary_keys
+            partition_format = self._schema.partition_format
             if partition_count and partition_keys and partition_size:
                 # This needs to happen before _evolve_pyarrow_schema
                 pa_table, partition_mode, updated_partition_keys = append_partition_key_to_table(
@@ -204,6 +209,7 @@ class PipelineNonDLT:
                     partition_size=partition_size,
                     partition_keys=partition_keys,
                     partition_mode=self._schema.partition_mode,
+                    partition_format=partition_format,
                     logger=self._logger,
                 )
 
@@ -257,9 +263,7 @@ class PipelineNonDLT:
 
         file_uris = delta_table.file_uris()
         self._logger.debug(f"Preparing S3 files - total parquet files: {len(file_uris)}")
-        prepare_s3_files_for_querying(
-            self._job.folder_path(), self._resource_name, file_uris, ExternalDataJob.PipelineVersion.V2
-        )
+        prepare_s3_files_for_querying(self._job.folder_path(), self._resource_name, file_uris)
 
         self._logger.debug("Updating last synced at timestamp on schema")
         _update_last_synced_at_sync(self._schema, self._job)

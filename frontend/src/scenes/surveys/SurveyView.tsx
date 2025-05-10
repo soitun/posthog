@@ -14,15 +14,25 @@ import { More } from 'lib/lemon-ui/LemonButton/More'
 import { LemonSkeleton } from 'lib/lemon-ui/LemonSkeleton'
 import { LemonTabs } from 'lib/lemon-ui/LemonTabs'
 import { useEffect, useState } from 'react'
-import { LinkedHogFunctions } from 'scenes/pipeline/hogfunctions/list/LinkedHogFunctions'
+import { LinkedHogFunctions } from 'scenes/hog-functions/list/LinkedHogFunctions'
 import { surveyLogic } from 'scenes/surveys/surveyLogic'
 import { SurveyOverview } from 'scenes/surveys/SurveyOverview'
 import { SurveyResponseFilters } from 'scenes/surveys/SurveyResponseFilters'
 import { surveysLogic } from 'scenes/surveys/surveysLogic'
+import { SurveyStatsSummary } from 'scenes/surveys/SurveyStatsSummary'
 
 import { Query } from '~/queries/Query/Query'
 import { NodeKind } from '~/queries/schema/schema-general'
-import { ActivityScope, PropertyFilterType, PropertyOperator, Survey, SurveyQuestionType } from '~/types'
+import {
+    ActivityScope,
+    PropertyFilterType,
+    PropertyOperator,
+    Survey,
+    SurveyEventName,
+    SurveyEventProperties,
+    SurveyQuestionType,
+    SurveyType,
+} from '~/types'
 
 import {
     NPS_DETRACTOR_LABEL,
@@ -31,8 +41,8 @@ import {
     NPS_PASSIVE_VALUES,
     NPS_PROMOTER_LABEL,
     NPS_PROMOTER_VALUES,
-    SURVEY_EVENT_NAME,
 } from './constants'
+import { SurveysDisabledBanner } from './SurveySettings'
 import {
     MultipleChoiceQuestionBarChart,
     NPSStackedBar,
@@ -40,14 +50,13 @@ import {
     OpenTextViz,
     RatingQuestionBarChart,
     SingleChoiceQuestionPieChart,
-    Summary,
 } from './surveyViewViz'
-
 export function SurveyView({ id }: { id: string }): JSX.Element {
     const { survey, surveyLoading } = useValues(surveyLogic)
     const { editingSurvey, updateSurvey, launchSurvey, stopSurvey, archiveSurvey, resumeSurvey, duplicateSurvey } =
         useActions(surveyLogic)
     const { deleteSurvey } = useActions(surveysLogic)
+    const { showSurveysDisabledBanner } = useValues(surveysLogic)
 
     const [tabKey, setTabKey] = useState(survey.start_date ? 'results' : 'overview')
 
@@ -67,7 +76,7 @@ export function SurveyView({ id }: { id: string }): JSX.Element {
                 <>
                     <PageHeader
                         buttons={
-                            <div className="flex items-center gap-2">
+                            <div className="flex gap-2 items-center">
                                 <More
                                     overlay={
                                         <>
@@ -155,6 +164,11 @@ export function SurveyView({ id }: { id: string }): JSX.Element {
                                     <LemonButton
                                         type="primary"
                                         data-attr="launch-survey"
+                                        disabledReason={
+                                            showSurveysDisabledBanner && survey.type !== SurveyType.API
+                                                ? 'Please enable surveys in the banner below before launching'
+                                                : undefined
+                                        }
                                         onClick={() => {
                                             LemonDialog.open({
                                                 title: 'Launch this survey?',
@@ -258,6 +272,7 @@ export function SurveyView({ id }: { id: string }): JSX.Element {
                             </>
                         }
                     />
+                    <SurveysDisabledBanner />
                     <LemonTabs
                         activeKey={tabKey}
                         onChange={(key) => setTabKey(key)}
@@ -287,16 +302,15 @@ export function SurveyView({ id }: { id: string }): JSX.Element {
                                         <LinkedHogFunctions
                                             logicKey="survey"
                                             type="destination"
-                                            subTemplateId="survey-response"
+                                            subTemplateIds={['survey-response']}
                                             filters={{
                                                 events: [
                                                     {
-                                                        id: 'survey sent',
+                                                        id: SurveyEventName.SENT,
                                                         type: 'events',
-                                                        order: 0,
                                                         properties: [
                                                             {
-                                                                key: '$survey_id',
+                                                                key: SurveyEventProperties.SURVEY_ID,
                                                                 type: PropertyFilterType.Event,
                                                                 value: id,
                                                                 operator: PropertyOperator.Exact,
@@ -327,8 +341,6 @@ export function SurveyResult({ disableEventsTable }: { disableEventsTable?: bool
         survey,
         dataTableQuery,
         surveyLoading,
-        surveyUserStats,
-        surveyUserStatsLoading,
         surveyRatingResults,
         surveyRatingResultsReady,
         surveyRecurringNPSResults,
@@ -353,7 +365,7 @@ export function SurveyResult({ disableEventsTable }: { disableEventsTable?: bool
                     <Spinner />
                 </div>
             )}
-            <Summary surveyUserStatsLoading={surveyUserStatsLoading} surveyUserStats={surveyUserStats} />
+            <SurveyStatsSummary />
             {survey.questions.map((question, i) => {
                 if (question.type === SurveyQuestionType.Rating) {
                     return (
@@ -449,7 +461,7 @@ function createNPSTrendSeries(
     }>
 } {
     return {
-        event: SURVEY_EVENT_NAME,
+        event: SurveyEventName.SENT,
         kind: NodeKind.EventsNode,
         custom_name: label,
         properties: [
@@ -481,7 +493,7 @@ function SurveyNPSResults({
         <div>
             {surveyNPSScore && (
                 <>
-                    <div className="flex items-center gap-2">
+                    <div className="flex gap-2 items-center">
                         <div className="text-4xl font-bold">{surveyNPSScore}</div>
                     </div>
                     <div className="mb-2 font-semibold text-secondary">
@@ -501,9 +513,9 @@ function SurveyNPSResults({
                 </>
             )}
             <div className="p-2 rounded deprecated-space-y-2 bg-surface-primary">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex gap-2 justify-between items-center">
                     <h4 className="text-lg font-semibold">NPS Trend</h4>
-                    <div className="flex items-center gap-2">
+                    <div className="flex gap-2 items-center">
                         <DateFilter
                             dateFrom={dateRange?.date_from ?? undefined}
                             dateTo={dateRange?.date_to ?? undefined}
@@ -518,12 +530,6 @@ function SurveyNPSResults({
                         <IntervalFilterStandalone
                             interval={interval ?? defaultInterval}
                             onIntervalChange={setInterval}
-                            options={[
-                                { value: 'hour', label: 'Hour' },
-                                { value: 'day', label: 'Day' },
-                                { value: 'week', label: 'Week' },
-                                { value: 'month', label: 'Month' },
-                            ]}
                         />
                         <CompareFilter
                             compareFilter={compareFilter}
@@ -562,7 +568,7 @@ function SurveyNPSResults({
                             properties: [
                                 {
                                     type: PropertyFilterType.Event,
-                                    key: '$survey_id',
+                                    key: SurveyEventProperties.SURVEY_ID,
                                     operator: PropertyOperator.Exact,
                                     value: survey.id,
                                 },
