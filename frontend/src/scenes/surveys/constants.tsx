@@ -5,15 +5,17 @@ import {
     Survey,
     SurveyAppearance,
     SurveyMatchType,
+    SurveyPosition,
     SurveyQuestionDescriptionContentType,
     SurveyQuestionType,
     SurveySchedule,
     SurveyType,
+    SurveyWidgetType,
 } from '~/types'
 
-export const SURVEY_EVENT_NAME = 'survey sent'
-export const SURVEY_RESPONSE_PROPERTY = '$survey_response'
 export const SURVEY_PAGE_SIZE = 100
+
+export const LINK_PAGE_SIZE = 100
 
 export const SurveyQuestionLabel: Record<SurveyQuestionType, string> = {
     [SurveyQuestionType.Open]: 'Freeform text',
@@ -45,8 +47,8 @@ export const defaultSurveyAppearance = {
     whiteLabel: false,
     displayThankYouMessage: true,
     thankYouMessageHeader: 'Thank you for your feedback!',
-    position: 'right',
-    widgetType: 'tab' as const,
+    position: SurveyPosition.Right,
+    widgetType: SurveyWidgetType.Tab,
     widgetLabel: 'Feedback',
     widgetColor: 'black',
 }
@@ -189,6 +191,8 @@ export const NEW_SURVEY: NewSurvey = {
     responses_limit: null,
     iteration_count: null,
     iteration_frequency_days: null,
+    // Partial responses off by default while we're in the beta
+    enable_partial_responses: false,
 }
 
 export enum SurveyTemplateType {
@@ -371,4 +375,12 @@ export const QUESTION_TYPE_ICON_MAP = {
     [SurveyQuestionType.Rating]: <IconAreaChart className="text-muted" />,
     [SurveyQuestionType.SingleChoice]: <IconListView className="text-muted" />,
     [SurveyQuestionType.MultipleChoice]: <IconGridView className="text-muted" />,
+}
+
+export const SURVEY_TYPE_LABEL_MAP = {
+    [SurveyType.API]: 'API',
+    [SurveyType.Widget]: 'Feedback Button',
+    [SurveyType.Popover]: 'Popover',
+    [SurveyType.FullScreen]: 'Full Screen',
+    [SurveyType.Email]: 'Email',
 }
