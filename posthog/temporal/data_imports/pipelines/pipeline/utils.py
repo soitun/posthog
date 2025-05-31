@@ -14,7 +14,6 @@ import orjson
 import pyarrow as pa
 import pyarrow.compute as pc
 from dateutil import parser
-from django.db.models import F
 from dlt.common.data_types.typing import TDataType
 from dlt.common.libs.deltalake import ensure_delta_compatible_arrow_schema
 from dlt.common.normalizers.naming.snake_case import NamingConvention
@@ -23,10 +22,10 @@ from dlt.sources import DltResource
 from posthog.temporal.common.logger import FilteringBoundLogger
 from posthog.temporal.data_imports.pipelines.pipeline.consts import PARTITION_KEY
 from posthog.temporal.data_imports.pipelines.pipeline.typings import (
+    PartitionFormat,
     PartitionMode,
     SourceResponse,
 )
-from posthog.warehouse.models import ExternalDataJob, ExternalDataSchema
 
 DLT_TO_PA_TYPE_MAP = {
     "text": pa.string(),
@@ -262,37 +261,23 @@ def _append_debug_column_to_pyarrows_table(table: pa.Table, load_id: int) -> pa.
     return table.append_column("_ph_debug", column)
 
 
-def should_partition_table(
-    delta_table: deltalake.DeltaTable | None, schema: ExternalDataSchema, source: SourceResponse
-) -> bool:
-    if not schema.is_incremental:
-        return False
-
-    if schema.partitioning_enabled and schema.partition_count is not None and schema.partitioning_keys is not None:
-        return True
-
-    if source.partition_count is None:
-        return False
-
-    if delta_table is None:
-        return True
-
-    delta_schema = delta_table.schema().to_pyarrow()
-    if PARTITION_KEY in delta_schema.names:
-        return True
-
-    return False
-
-
 def normalize_table_column_names(table: pa.Table) -> pa.Table:
+    used_names = set()
+
     for column_name in table.column_names:
         normalized_column_name = normalize_column_name(column_name)
-        if normalized_column_name != column_name:
+        temp_name = normalized_column_name
+
+        if temp_name != column_name:
+            while temp_name in used_names or temp_name in table.column_names:
+                temp_name = "_" + temp_name
+
             table = table.set_column(
                 table.schema.get_field_index(column_name),
-                normalized_column_name,
+                temp_name,
                 table.column(column_name),  # type: ignore
             )
+            used_names.add(temp_name)
 
     return table
 
@@ -303,6 +288,7 @@ def append_partition_key_to_table(
     partition_size: int,
     partition_keys: list[str],
     partition_mode: PartitionMode | None,
+    partition_format: PartitionFormat | None,
     logger: FilteringBoundLogger,
 ) -> tuple[pa.Table, PartitionMode, list[str]]:
     normalized_partition_keys = [normalize_column_name(key) for key in partition_keys]
@@ -345,11 +331,17 @@ def append_partition_key_to_table(
             elif mode == "datetime":
                 key = normalized_partition_keys[0]
                 date = row[key]
+
+                if partition_format == "day":
+                    date_format = "%Y-%m-%d"
+                else:
+                    date_format = "%Y-%m"
+
                 if isinstance(date, int):
                     date = datetime.datetime.fromtimestamp(date)
-                    partition_array.append(date.strftime("%Y-%m"))
+                    partition_array.append(date.strftime(date_format))
                 elif isinstance(date, datetime.datetime):
-                    partition_array.append(date.strftime("%Y-%m"))
+                    partition_array.append(date.strftime(date_format))
                 else:
                     partition_array.append("1970-01")
             else:
@@ -359,32 +351,6 @@ def append_partition_key_to_table(
     logger.debug(f"Partition key added with mode={mode}")
 
     return table.append_column(PARTITION_KEY, new_column), mode, normalized_partition_keys
-
-
-def _get_incremental_field_last_value(schema: ExternalDataSchema | None, table: pa.Table) -> Any:
-    if schema is None or schema.sync_type != ExternalDataSchema.SyncType.INCREMENTAL:
-        return
-
-    incremental_field_name: str | None = schema.sync_type_config.get("incremental_field")
-    if incremental_field_name is None:
-        return
-
-    column = table[normalize_column_name(incremental_field_name)]
-    numpy_arr = column.combine_chunks().to_pandas().dropna().to_numpy()
-
-    # TODO(@Gilbert09): support different operations here (e.g. min)
-    last_value = numpy_arr.max()
-    return last_value
-
-
-def _update_last_synced_at_sync(schema: ExternalDataSchema, job: ExternalDataJob) -> None:
-    schema.last_synced_at = job.created_at
-    schema.save()
-
-
-def _update_job_row_count(job_id: str, count: int, logger: FilteringBoundLogger) -> None:
-    logger.debug(f"Updating rows_synced with +{count}")
-    ExternalDataJob.objects.filter(id=job_id).update(rows_synced=F("rows_synced") + count)
 
 
 def _convert_uuid_to_string(row: dict) -> dict:
@@ -580,6 +546,15 @@ def _process_batch(table_data: list[dict], schema: Optional[pa.Schema] = None) -
             # Remove any binary columns
             if pa.types.is_binary(field.type):
                 drop_column_names.add(field_name)
+
+            # Ensure duration columns have the correct arrow type
+            col = columnar_table_data[field_name]
+            if (
+                isinstance(col, pa.Array)
+                and pa.types.is_duration(col.type)
+                and not pa.types.is_duration(arrow_schema.field(field_index).type)
+            ):
+                arrow_schema = arrow_schema.set(field_index, arrow_schema.field(field_index).with_type(col.type))
 
         # Convert UUIDs to strings
         if issubclass(py_type, uuid.UUID):
