@@ -1,8 +1,8 @@
 use crate::api::errors::FlagError;
-use crate::client::database::Client as DatabaseClient;
-use crate::cohort::cohort_models::CohortId;
+use crate::cohorts::cohort_models::CohortId;
 use crate::flags::flag_models::*;
-use crate::properties::property_models::PropertyFilter;
+use crate::properties::property_models::{PropertyFilter, PropertyType};
+use common_database::Client as DatabaseClient;
 use common_redis::Client as RedisClient;
 use std::sync::Arc;
 use tracing::instrument;
@@ -10,7 +10,7 @@ use tracing::instrument;
 impl PropertyFilter {
     /// Checks if the filter is a cohort filter
     pub fn is_cohort(&self) -> bool {
-        self.key == "id" && self.prop_type == "cohort"
+        self.key == "id" && self.prop_type == PropertyType::Cohort
     }
 
     /// Returns the cohort id if the filter is a cohort filter, or None if it's not a cohort filter
@@ -19,7 +19,10 @@ impl PropertyFilter {
         if !self.is_cohort() {
             return None;
         }
-        self.value.as_i64().map(|id| id as CohortId)
+        self.value
+            .as_ref()
+            .and_then(|value| value.as_i64())
+            .map(|id| id as CohortId)
     }
 }
 
@@ -28,7 +31,7 @@ impl FeatureFlag {
         self.filters.aggregation_group_type_index
     }
 
-    pub fn get_conditions(&self) -> &Vec<FlagGroupType> {
+    pub fn get_conditions(&self) -> &Vec<FlagPropertyGroup> {
         &self.filters.groups
     }
 
@@ -68,8 +71,6 @@ impl FeatureFlagList {
         let flags_list: Vec<FeatureFlag> =
             serde_json::from_str(&serialized_flags).map_err(|e| {
                 tracing::error!("failed to parse data to flags list: {}", e);
-                println!("failed to parse data: {}", e);
-
                 FlagError::RedisDataParsingError
             })?;
 
@@ -175,7 +176,10 @@ impl FeatureFlagList {
 
 #[cfg(test)]
 mod tests {
-    use crate::{flags::flag_models::*, properties::property_models::OperatorType};
+    use crate::{
+        flags::flag_models::*,
+        properties::property_models::{OperatorType, PropertyType},
+    };
     use rand::Rng;
     use serde_json::json;
     use std::time::Instant;
@@ -278,9 +282,9 @@ mod tests {
             .expect("Properties don't exist on flag")[0];
 
         assert_eq!(property_filter.key, "email");
-        assert_eq!(property_filter.value, "a@b.com");
+        assert_eq!(property_filter.value, Some(json!("a@b.com")));
         assert_eq!(property_filter.operator, None);
-        assert_eq!(property_filter.prop_type, "person");
+        assert_eq!(property_filter.prop_type, PropertyType::Person);
         assert_eq!(property_filter.group_type_index, None);
         assert_eq!(flag.filters.groups[0].rollout_percentage, Some(50.0));
     }
@@ -312,7 +316,7 @@ mod tests {
         assert_eq!(flag.key, "𝖚𝖙𝖋16_𝖙𝖊𝖘𝖙_𝖋𝖑𝖆𝖌");
         let property = &flag.filters.groups[0].properties.as_ref().unwrap()[0];
         assert_eq!(property.key, "𝖕𝖗𝖔𝖕𝖊𝖗𝖙𝖞");
-        assert_eq!(property.value, json!("𝓿𝓪𝓵𝓾𝓮"));
+        assert_eq!(property.value, Some(json!("𝓿𝓪𝓵𝓾𝓮")));
     }
 
     #[test]
@@ -865,9 +869,9 @@ mod tests {
                                 "operator": "exact"
                             },
                             {
-                                "key": "purchase",
-                                "value": "completed",
-                                "type": "event",
+                                "key": "cohort",
+                                "value": "123",
+                                "type": "cohort",
                                 "operator": "exact"
                             }
                         ],
@@ -918,9 +922,9 @@ mod tests {
         assert_eq!(redis_flag.key, "flag_with_different_properties");
         let redis_properties = &redis_flag.filters.groups[0].properties.as_ref().unwrap();
         assert_eq!(redis_properties.len(), 3);
-        assert_eq!(redis_properties[0].prop_type, "person");
-        assert_eq!(redis_properties[1].prop_type, "group");
-        assert_eq!(redis_properties[2].prop_type, "event");
+        assert_eq!(redis_properties[0].prop_type, PropertyType::Person);
+        assert_eq!(redis_properties[1].prop_type, PropertyType::Group);
+        assert_eq!(redis_properties[2].prop_type, PropertyType::Cohort);
 
         // Fetch and verify from Postgres
         let pg_flags = FeatureFlagList::from_pg(reader, team.project_id)
@@ -932,9 +936,9 @@ mod tests {
         assert_eq!(pg_flag.key, "flag_with_different_properties");
         let pg_properties = &pg_flag.filters.groups[0].properties.as_ref().unwrap();
         assert_eq!(pg_properties.len(), 3);
-        assert_eq!(pg_properties[0].prop_type, "person");
-        assert_eq!(pg_properties[1].prop_type, "group");
-        assert_eq!(pg_properties[2].prop_type, "event");
+        assert_eq!(pg_properties[0].prop_type, PropertyType::Person);
+        assert_eq!(pg_properties[1].prop_type, PropertyType::Group);
+        assert_eq!(pg_properties[2].prop_type, PropertyType::Cohort);
     }
 
     #[tokio::test]
@@ -1506,5 +1510,28 @@ mod tests {
             assert!(flags.flags.iter().any(|f| f.key == "fractional_percent"
                 && (f.filters.groups[0].rollout_percentage.unwrap() - 33.33).abs() < f64::EPSILON));
         }
+    }
+
+    #[test]
+    fn test_empty_filters_deserialization() {
+        let empty_filters_json = r#"{
+            "id": 1,
+            "team_id": 2,
+            "name": "Empty Filters Flag",
+            "key": "empty_filters",
+            "filters": {},
+            "deleted": false,
+            "active": true
+        }"#;
+
+        let flag: FeatureFlag =
+            serde_json::from_str(empty_filters_json).expect("Should deserialize empty filters");
+
+        assert_eq!(flag.filters.groups.len(), 0);
+        assert!(flag.filters.multivariate.is_none());
+        assert!(flag.filters.aggregation_group_type_index.is_none());
+        assert!(flag.filters.payloads.is_none());
+        assert!(flag.filters.super_groups.is_none());
+        assert!(flag.filters.holdout_groups.is_none());
     }
 }

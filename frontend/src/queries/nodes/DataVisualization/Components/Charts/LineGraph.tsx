@@ -1,5 +1,4 @@
 import 'chartjs-adapter-dayjs-3'
-import './LineGraph.scss'
 // TODO: Move the below scss to somewhere more common
 import '../../../../../scenes/insights/InsightTooltip/InsightTooltip.scss'
 
@@ -24,6 +23,7 @@ import { useValues } from 'kea'
 import { Chart, ChartItem, ChartOptions } from 'lib/Chart'
 import { getGraphColors, getSeriesColor } from 'lib/colors'
 import { InsightLabel } from 'lib/components/InsightLabel'
+import { useResizeObserver } from 'lib/hooks/useResizeObserver'
 import { hexToRGBA } from 'lib/utils'
 import { useEffect, useRef } from 'react'
 import { ensureTooltip } from 'scenes/insights/views/LineGraph/LineGraph'
@@ -96,6 +96,7 @@ const getYAxisSettings = (
 // LineGraph displays a graph using either x and y data or series breakdown data
 export const LineGraph = (): JSX.Element => {
     const canvasRef = useRef<HTMLCanvasElement | null>(null)
+    const { ref: containerRef, height } = useResizeObserver()
     const colors = getGraphColors()
 
     // TODO: Extract this logic out of this component and inject values in
@@ -264,7 +265,7 @@ export const LineGraph = (): JSX.Element => {
         const tickOptions: Partial<TickOptions> = {
             color: colors.axisLabel as Color,
             font: {
-                family: '-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Roboto", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"',
+                family: '"Emoji Flags Polyfill", -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Roboto", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"',
                 size: 12,
                 weight: 'normal',
             },
@@ -361,28 +362,57 @@ export const LineGraph = (): JSX.Element => {
 
                         if (tooltip.body) {
                             const referenceDataPoint = tooltip.dataPoints[0] // Use this point as reference to get the date
+
+                            const tooltipData = ySeriesData.map((series) => {
+                                const seriesName =
+                                    series?.settings?.display?.label ||
+                                    ('column' in series ? series.column.name : series.name)
+                                return {
+                                    series: seriesName,
+                                    data: formatDataWithSettings(
+                                        series.data[referenceDataPoint.dataIndex],
+                                        series.settings
+                                    ),
+                                    rawData: series.data[referenceDataPoint.dataIndex],
+                                    dataIndex: referenceDataPoint.dataIndex,
+                                    isTotalRow: false,
+                                }
+                            })
+
+                            if (tooltipData.length > 1) {
+                                const rawData = (
+                                    ySeriesData as (AxisSeries<number> | AxisBreakdownSeries<number>)[]
+                                ).reduce((acc: number, cur: AxisSeries<number> | AxisBreakdownSeries<number>) => {
+                                    acc += cur.data[referenceDataPoint.dataIndex]
+                                    return acc
+                                }, 0)
+
+                                tooltipData.push({
+                                    series: '',
+                                    data: rawData.toString(),
+                                    rawData: rawData,
+                                    dataIndex: referenceDataPoint.dataIndex,
+                                    isTotalRow: true,
+                                })
+                            }
+
                             tooltipRoot.render(
                                 <div className="InsightTooltip">
                                     <LemonTable
-                                        dataSource={ySeriesData.map((series) => {
-                                            const seriesName =
-                                                series?.settings?.display?.label ||
-                                                ('column' in series ? series.column.name : series.name)
-                                            return {
-                                                series: seriesName,
-                                                data: formatDataWithSettings(
-                                                    series.data[referenceDataPoint.dataIndex],
-                                                    series.settings
-                                                ),
-                                                rawData: series.data[referenceDataPoint.dataIndex],
-                                                dataIndex: referenceDataPoint.dataIndex,
-                                            }
-                                        })}
+                                        dataSource={tooltipData}
                                         columns={[
                                             {
                                                 title: xSeriesData.data[referenceDataPoint.dataIndex],
                                                 dataIndex: 'series',
-                                                render: (value) => {
+                                                render: (value, record) => {
+                                                    if (record.isTotalRow) {
+                                                        return (
+                                                            <div className="datum-label-column font-extrabold">
+                                                                Total
+                                                            </div>
+                                                        )
+                                                    }
+
                                                     return (
                                                         <div className="datum-label-column">
                                                             <InsightLabel
@@ -421,9 +451,13 @@ export const LineGraph = (): JSX.Element => {
                                             },
                                         ]}
                                         uppercaseHeader={false}
-                                        rowRibbonColor={(_datum, index) =>
-                                            ySeriesData[index]?.settings?.display?.color ?? getSeriesColor(index)
-                                        }
+                                        rowRibbonColor={(_datum, index) => {
+                                            if (_datum.isTotalRow) {
+                                                return undefined
+                                            }
+
+                                            return ySeriesData[index]?.settings?.display?.color ?? getSeriesColor(index)
+                                        }}
                                         showHeader
                                     />
                                 </div>
@@ -503,12 +537,19 @@ export const LineGraph = (): JSX.Element => {
     return (
         <div
             className={clsx('rounded bg-surface-primary relative flex flex-1 flex-col p-2', {
-                DataVisualization__LineGraph: presetChartHeight,
-                'h-full': !presetChartHeight,
                 border: showEditingUI,
+                'h-[60vh]': presetChartHeight,
+                'h-full': !presetChartHeight,
             })}
+            ref={containerRef}
         >
-            <div className="flex flex-1 w-full h-full overflow-hidden">
+            <div
+                className={clsx('flex flex-1 w-full overflow-hidden', {
+                    'h-full': !presetChartHeight,
+                })}
+                // eslint-disable-next-line react/forbid-dom-props
+                style={height ? { height: `${height}px` } : {}}
+            >
                 <canvas ref={canvasRef} />
             </div>
         </div>

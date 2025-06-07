@@ -10,11 +10,11 @@ import { LemonTag } from 'lib/lemon-ui/LemonTag'
 import { Tooltip } from 'lib/lemon-ui/Tooltip'
 import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { capitalizeFirstLetter } from 'lib/utils'
+import { RevenueAnalyticsSettings } from 'products/revenue_analytics/frontend/settings/RevenueAnalyticsSettings'
 import React from 'react'
 import { NewActionButton } from 'scenes/actions/NewActionButton'
 import { Annotations } from 'scenes/annotations'
 import { NewAnnotationButton } from 'scenes/annotations/AnnotationModal'
-import { RevenueEventsSettings } from 'scenes/data-management/revenue/RevenueEventsSettings'
 import { Scene, SceneExport } from 'scenes/sceneTypes'
 import { urls } from 'scenes/urls'
 
@@ -35,6 +35,7 @@ export enum DataManagementTab {
     IngestionWarnings = 'warnings',
     Revenue = 'revenue',
 }
+
 const tabs: Record<
     DataManagementTab,
     {
@@ -43,12 +44,14 @@ const tabs: Record<
         content: JSX.Element
         buttons?: React.ReactNode
         flag?: FeatureFlagKey
+        tooltipDocLink?: string
     }
 > = {
     [DataManagementTab.EventDefinitions]: {
         url: urls.eventDefinitions(),
         label: 'Events',
         content: <EventDefinitionsTable />,
+        tooltipDocLink: 'https://posthog.com/docs/data/events',
     },
     [DataManagementTab.Actions]: {
         url: urls.actions(),
@@ -65,6 +68,7 @@ const tabs: Record<
         ),
         buttons: <NewActionButton />,
         content: <ActionsTable />,
+        tooltipDocLink: 'https://posthog.com/docs/data/actions',
     },
     [DataManagementTab.PropertyDefinitions]: {
         url: urls.propertyDefinitions(),
@@ -80,12 +84,14 @@ const tabs: Record<
             </TitleWithIcon>
         ),
         content: <PropertyDefinitionsTable />,
+        tooltipDocLink: 'https://posthog.com/docs/new-to-posthog/understand-posthog#properties',
     },
     [DataManagementTab.Annotations]: {
         url: urls.annotations(),
         content: <Annotations />,
         label: 'Annotations',
         buttons: <NewAnnotationButton />,
+        tooltipDocLink: 'https://posthog.com/docs/data/annotations',
     },
     [DataManagementTab.History]: {
         url: urls.dataManagementHistory(),
@@ -96,9 +102,10 @@ const tabs: Record<
                 caption="Only actions taken in the UI are captured in History. Automatic creation of definitions by ingestion is not shown here."
             />
         ),
+        tooltipDocLink: 'https://posthog.com/docs/data#history',
     },
     [DataManagementTab.Revenue]: {
-        url: urls.revenue(),
+        url: urls.revenueSettings(),
         label: (
             <>
                 Revenue{' '}
@@ -107,22 +114,22 @@ const tabs: Record<
                 </LemonTag>
             </>
         ),
-        content: <RevenueEventsSettings />,
-        flag: FEATURE_FLAGS.WEB_REVENUE_TRACKING,
+        content: <RevenueAnalyticsSettings />,
     },
     [DataManagementTab.IngestionWarnings]: {
         url: urls.ingestionWarnings(),
         label: 'Ingestion warnings',
         content: <IngestionWarningsView />,
         flag: FEATURE_FLAGS.INGESTION_WARNINGS_ENABLED,
+        tooltipDocLink: 'https://posthog.com/docs/data/ingestion-warnings',
     },
 }
 
 const dataManagementSceneLogic = kea<dataManagementSceneLogicType>([
     path(['scenes', 'events', 'dataManagementSceneLogic']),
-    connect({
+    connect(() => ({
         values: [featureFlagLogic, ['featureFlags']],
-    }),
+    })),
     actions({
         setTab: (tab: DataManagementTab) => ({ tab }),
     }),
@@ -172,7 +179,7 @@ const dataManagementSceneLogic = kea<dataManagementSceneLogicType>([
                 // otherwise we can't use a url with parameters as a landing page
                 return
             }
-            return tabUrl
+            return [tabUrl, router.values.searchParams, router.values.hashParams]
         },
     })),
     urlToAction(({ actions, values }) => {
@@ -192,12 +199,25 @@ const dataManagementSceneLogic = kea<dataManagementSceneLogicType>([
 export function DataManagementScene(): JSX.Element {
     const { enabledTabs, tab } = useValues(dataManagementSceneLogic)
     const { setTab } = useActions(dataManagementSceneLogic)
+    const { featureFlags } = useValues(featureFlagLogic)
 
     const lemonTabs: LemonTab<DataManagementTab>[] = enabledTabs.map((key) => ({
         key: key as DataManagementTab,
         label: <span data-attr={`data-management-${key}-tab`}>{tabs[key].label}</span>,
         content: tabs[key].content,
+        tooltipDocLink: tabs[key].tooltipDocLink,
     }))
+
+    if (featureFlags[FEATURE_FLAGS.TREE_VIEW] || featureFlags[FEATURE_FLAGS.TREE_VIEW_RELEASE]) {
+        if (enabledTabs.includes(tab)) {
+            return (
+                <>
+                    <PageHeader buttons={<>{tabs[tab].buttons}</>} />
+                    {tabs[tab].content}
+                </>
+            )
+        }
+    }
 
     return (
         <>

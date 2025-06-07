@@ -1,5 +1,11 @@
+import equal from 'fast-deep-equal'
+import { LogicWrapper } from 'kea'
+import { routerType } from 'kea-router/lib/routerType'
+import { OrganizationMembershipLevel } from 'lib/constants'
 import { dayjs } from 'lib/dayjs'
+import { Params } from 'scenes/sceneTypes'
 
+import { OrganizationType } from '~/types'
 import { BillingProductV2Type, BillingTierType, BillingType } from '~/types'
 
 export const summarizeUsage = (usage: number | null): string => {
@@ -242,4 +248,86 @@ export const getProration = ({
 
 export const getProrationMessage = (prorationAmount: string, unitAmountUsd: string | null): string => {
     return `Pay ~$${prorationAmount} today (prorated) and $${parseInt(unitAmountUsd || '0')} every month thereafter.`
+}
+
+/**
+ * Formats the plan status for display, trial or not
+ */
+export const formatPlanStatus = (billing: BillingType | null): string => {
+    if (!billing) {
+        return ''
+    }
+
+    // Check for old-style active trial
+    if (billing.free_trial_until && billing.free_trial_until.isAfter(dayjs())) {
+        return '(trial plan)'
+    }
+
+    // Check for new-style active trial
+    if (billing.trial?.status === 'active') {
+        return '(trial plan)'
+    }
+
+    // Check for expired trial
+    if (billing.trial?.status === 'expired' && billing.trial.expires_at) {
+        return `(trial expired)`
+    }
+
+    // Regular paid plan
+    if (billing.subscription_level !== 'free') {
+        return '(your plan)'
+    }
+
+    return ''
+}
+
+/**
+ * Formats a number as a currency string
+ */
+export const currencyFormatter = (value: number): string => {
+    return new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'USD',
+    }).format(value)
+}
+
+/**
+ * Determines if the user has sufficient permissions to read billing information based on their organization membership level.
+ */
+export function canAccessBilling(
+    currentOrganization: Pick<OrganizationType, 'membership_level'> | null | undefined
+): boolean {
+    if (!currentOrganization || !currentOrganization.membership_level) {
+        return false
+    }
+    return currentOrganization.membership_level >= OrganizationMembershipLevel.Admin
+}
+
+/**
+ * Synchronizes URL search parameters with billing filter state.
+ * Returns the appropriate router action format for kea-router.
+ * Only updates the URL if parameters have actually changed.
+ */
+export function syncBillingSearchParams(
+    router: LogicWrapper<routerType>,
+    updateParams: (searchParams: Params) => Params
+): [string, Params, Record<string, any>, { replace: boolean }] {
+    const currentSearchParams = { ...router.values.searchParams }
+    const updatedSearchParams = updateParams(currentSearchParams)
+    if (!equal(updatedSearchParams, router.values.searchParams)) {
+        return [router.values.location.pathname, updatedSearchParams, router.values.hashParams, { replace: true }]
+    }
+    return [router.values.location.pathname, router.values.searchParams, router.values.hashParams, { replace: false }]
+}
+
+/**
+ * Updates a search parameter if the value differs from the default.
+ * Removes the parameter entirely if it matches the default to keep URLs clean.
+ */
+export function updateBillingSearchParams<T>(searchParams: Params, key: string, value: T, defaultValue: T): void {
+    if (!equal(value, defaultValue)) {
+        searchParams[key] = value
+    } else {
+        delete searchParams[key]
+    }
 }

@@ -38,6 +38,7 @@ export const TaxonomicBreakdownPopover = ({
         TaxonomicFilterGroupType.EventProperties,
         TaxonomicFilterGroupType.PersonProperties,
         TaxonomicFilterGroupType.EventFeatureFlags,
+        TaxonomicFilterGroupType.EventMetadata,
         ...groupsTaxonomicTypes,
         TaxonomicFilterGroupType.CohortsWithAllUsers,
         ...(includeSessions ? [TaxonomicFilterGroupType.SessionProperties] : []),
@@ -48,6 +49,7 @@ export const TaxonomicBreakdownPopover = ({
 
     return (
         <Popover
+            style={{ minHeight: '200px' }}
             overlay={
                 <TaxonomicFilter
                     groupType={taxanomicType}

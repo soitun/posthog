@@ -23,6 +23,8 @@ from posthog.schema import (
     ExperimentSignificanceCode,
     ExperimentVariantTrendsBaseStats,
     ExperimentMeanMetric,
+    FunnelConversionWindowTimeUnit,
+    LegacyExperimentQueryResponse,
     PropertyOperator,
 )
 from posthog.test.base import (
@@ -39,52 +41,6 @@ from parameterized import parameterized
 
 @override_settings(IN_UNIT_TESTING=True)
 class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
-    @freeze_time("2020-01-01T12:00:00Z")
-    @snapshot_clickhouse_queries
-    def test_query_runner_mean_property_sum_metric(self):
-        feature_flag = self.create_feature_flag()
-        experiment = self.create_experiment(feature_flag=feature_flag)
-        experiment.stats_config = {"version": 2}
-        experiment.save()
-
-        metric = ExperimentMeanMetric(
-            source=EventsNode(
-                event="purchase",
-                math=ExperimentMetricMathType.SUM,
-                math_property="amount",
-            ),
-        )
-
-        experiment_query = ExperimentQuery(
-            experiment_id=experiment.id,
-            kind="ExperimentQuery",
-            metric=metric,
-        )
-
-        experiment.metrics = [metric.model_dump(mode="json")]
-        experiment.save()
-
-        self.create_standard_test_events(feature_flag)
-
-        flush_persons_and_events()
-
-        query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
-
-        self.assertEqual(len(result.variants), 2)
-
-        control_variant = cast(
-            ExperimentVariantTrendsBaseStats, next(variant for variant in result.variants if variant.key == "control")
-        )
-        test_variant = cast(
-            ExperimentVariantTrendsBaseStats, next(variant for variant in result.variants if variant.key == "test")
-        )
-
-        self.assertEqual(control_variant.count, 20)
-        self.assertEqual(test_variant.count, 20)
-        self.assertEqual(control_variant.absolute_exposure, 10)
-        self.assertEqual(test_variant.absolute_exposure, 10)
-
     @freeze_time("2020-01-01T12:00:00Z")
     @snapshot_clickhouse_queries
     def test_query_runner_includes_date_range(self):
@@ -178,7 +134,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         flush_persons_and_events()
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -261,7 +217,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         flush_persons_and_events()
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -324,7 +280,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         flush_persons_and_events()
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -366,7 +322,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         flush_persons_and_events()
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -408,7 +364,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         flush_persons_and_events()
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -512,7 +468,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
         with freeze_time("2023-01-07"):
-            result = query_runner.calculate()
+            result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -612,7 +568,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
         self.assertEqual(query_runner.stats_version, 2)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
         for variant in result.variants:
@@ -695,7 +651,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
         with freeze_time("2023-01-07"):
-            result = query_runner.calculate()
+            result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -764,7 +720,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
         with freeze_time("2023-01-07"):
-            result = query_runner.calculate()
+            result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -840,7 +796,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         )
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -854,6 +810,80 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         self.assertEqual(control_variant.count, 6)
         self.assertEqual(test_variant.count, 8)
         self.assertEqual(control_variant.absolute_exposure, 10)
+        self.assertEqual(test_variant.absolute_exposure, 10)
+
+    @snapshot_clickhouse_queries
+    def test_query_runner_with_custom_exposure_without_properties(self):
+        feature_flag = self.create_feature_flag()
+        experiment = self.create_experiment(
+            feature_flag=feature_flag, start_date=datetime(2020, 1, 1), end_date=datetime(2020, 1, 31)
+        )
+
+        feature_flag_property = f"$feature/{feature_flag.key}"
+
+        for variant, purchase_count in [("control", 6), ("test", 8)]:
+            for i in range(10):
+                _create_person(distinct_ids=[f"user_{variant}_{i}"], team_id=self.team.pk)
+                _create_event(
+                    team=self.team,
+                    event="$pageview",
+                    distinct_id=f"user_{variant}_{i}",
+                    timestamp="2020-01-02T12:00:00Z",
+                    properties={
+                        feature_flag_property: variant,
+                    },
+                )
+                if i < purchase_count:
+                    _create_event(
+                        team=self.team,
+                        event="purchase",
+                        distinct_id=f"user_{variant}_{i}",
+                        timestamp="2020-01-02T12:01:00Z",
+                        properties={feature_flag_property: variant, "amount": 10 if i < 2 else ""},
+                    )
+
+        # Extra exposure that should be included
+        _create_event(
+            team=self.team,
+            event="$pageview",
+            distinct_id=f"user_extra_1",
+            timestamp="2020-01-02T12:00:00Z",
+            properties={feature_flag_property: "control"},
+        )
+
+        flush_persons_and_events()
+
+        exposure_config = ExperimentEventExposureConfig(
+            event="$pageview",
+            properties=[],
+        )
+        experiment.exposure_criteria = {
+            "exposure_config": exposure_config.model_dump(mode="json"),
+        }
+        experiment.save()
+        experiment_query = ExperimentQuery(
+            experiment_id=experiment.id,
+            kind="ExperimentQuery",
+            metric=ExperimentMeanMetric(
+                source=EventsNode(event="purchase"),
+            ),
+        )
+
+        query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
+
+        self.assertEqual(len(result.variants), 2)
+
+        control_variant = cast(
+            ExperimentVariantTrendsBaseStats, next(variant for variant in result.variants if variant.key == "control")
+        )
+        test_variant = cast(
+            ExperimentVariantTrendsBaseStats, next(variant for variant in result.variants if variant.key == "test")
+        )
+
+        self.assertEqual(control_variant.count, 6)
+        self.assertEqual(test_variant.count, 8)
+        self.assertEqual(control_variant.absolute_exposure, 11)
         self.assertEqual(test_variant.absolute_exposure, 10)
 
     @snapshot_clickhouse_queries
@@ -894,7 +924,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         # Extra exposure that should be excluded
         _create_event(
             team=self.team,
-            event="$pageview",
+            event="$feature_flag_called",
             distinct_id=f"user_extra_1",
             timestamp="2020-01-02T12:00:00Z",
             properties={
@@ -925,7 +955,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         )
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -979,7 +1009,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         flush_persons_and_events()
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -1020,7 +1050,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
         with self.assertRaises(ValidationError) as context:
-            query_runner.calculate()
+            cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         expected_errors = json.dumps(
             {
@@ -1072,7 +1102,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
         with self.assertRaises(ValidationError) as context:
-            query_runner.calculate()
+            cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         expected_errors = json.dumps(
             {
@@ -1132,7 +1162,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
         with self.assertRaises(ValidationError) as context:
-            query_runner.calculate()
+            cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         expected_errors = json.dumps(
             {
@@ -1370,7 +1400,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         # "feature_flags" and "element" filter out all events
         if name == "feature_flags" or name == "element":
             with self.assertRaises(ValidationError) as context:
-                query_runner.calculate()
+                cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
             expected_errors = json.dumps(
                 {
@@ -1381,7 +1411,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
             )
             self.assertEqual(cast(list, context.exception.detail)[0], expected_errors)
         else:
-            result = query_runner.calculate()
+            result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
             control_result = cast(
                 ExperimentVariantTrendsBaseStats,
@@ -1408,7 +1438,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         experiment.save()
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         control_result = cast(
             ExperimentVariantTrendsBaseStats, next(variant for variant in result.variants if variant.key == "control")
@@ -1469,7 +1499,8 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
 
         metric = ExperimentMeanMetric(
             source=EventsNode(event="purchase"),
-            time_window_hours=time_window_hours,
+            conversion_window=time_window_hours,
+            conversion_window_unit=FunnelConversionWindowTimeUnit.HOUR,
         )
 
         experiment_query = ExperimentQuery(
@@ -1508,7 +1539,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         flush_persons_and_events()
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -1766,7 +1797,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
             self.assertEqual(cast(list, context.exception.detail)[0], expected_errors)
         else:
             with freeze_time("2023-01-07"):
-                result = query_runner.calculate()
+                result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
             self.assertEqual(len(result.variants), 2)
 
@@ -1803,7 +1834,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
         with freeze_time("2023-01-07"):
-            result = query_runner.calculate()
+            result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -1819,7 +1850,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
 
     @snapshot_clickhouse_queries
     def test_query_runner_with_data_warehouse_subscriptions_table(self):
-        table_name = self.create_data_warehouse_table_with_subscriptions()
+        subscriptions_table_name = self.create_data_warehouse_table_with_subscriptions()
 
         feature_flag = self.create_feature_flag()
         experiment = self.create_experiment(
@@ -1832,7 +1863,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
 
         metric = ExperimentMeanMetric(
             source=ExperimentDataWarehouseNode(
-                table_name=table_name,
+                table_name=subscriptions_table_name,
                 events_join_key="person.properties.email",
                 data_warehouse_join_key="subscription_customer.customer_email",
                 timestamp_field="subscription_created_at",
@@ -1892,7 +1923,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
 
         with freeze_time("2023-01-10"):
-            result = query_runner.calculate()
+            result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 
@@ -2015,7 +2046,7 @@ class TestExperimentQueryRunner(ExperimentQueryRunnerBaseTest):
         flush_persons_and_events()
 
         query_runner = ExperimentQueryRunner(query=experiment_query, team=self.team)
-        result = query_runner.calculate()
+        result = cast(LegacyExperimentQueryResponse, query_runner.calculate())
 
         self.assertEqual(len(result.variants), 2)
 

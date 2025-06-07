@@ -39,20 +39,14 @@ export interface AnnotationModalForm {
 
 export const annotationModalLogic = kea<annotationModalLogicType>([
     path(['scenes', 'annotations', 'annotationModalLogic']),
-    connect({
+    connect(() => ({
         actions: [
             annotationsModel,
-            [
-                'loadAnnotationsNext',
-                'loadAnnotationsSuccess',
-                'replaceAnnotation',
-                'appendAnnotations',
-                'deleteAnnotation',
-            ],
+            ['loadAnnotationsSuccess', 'replaceAnnotation', 'appendAnnotations', 'deleteAnnotation'],
         ],
         values: [
             annotationsModel,
-            ['annotations', 'annotationsLoading', 'next', 'loadingNext'],
+            ['annotations', 'annotationsLoading'],
             teamLogic,
             ['timezone'],
             userLogic,
@@ -60,7 +54,7 @@ export const annotationModalLogic = kea<annotationModalLogicType>([
             featureFlagLogic,
             ['featureFlags'],
         ],
-    }),
+    })),
     actions({
         openModalToCreateAnnotation: (
             initialDate?: Dayjs | null,
