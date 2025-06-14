@@ -27,13 +27,14 @@ from posthog.permissions import (
     APIScopePermission,
     OrganizationAdminWritePermissions,
     TimeSensitiveActionPermission,
+    OrganizationInviteSettingsPermission,
     extract_organization,
 )
 from posthog.user_permissions import UserPermissions, UserPermissionsSerializerMixin
 from rest_framework.decorators import action
 from posthog.rbac.migrations.rbac_team_migration import rbac_team_access_control_migration
 from posthog.rbac.migrations.rbac_feature_flag_migration import rbac_feature_flag_role_access_migration
-from sentry_sdk import capture_exception
+from posthog.exceptions_capture import capture_exception
 from drf_spectacular.utils import extend_schema
 from posthog.event_usage import report_organization_action
 
@@ -102,8 +103,10 @@ class OrganizationSerializer(
             "metadata",
             "customer_id",
             "enforce_2fa",
+            "members_can_invite",
             "member_count",
             "is_ai_data_processing_approved",
+            "default_experiment_stats_method",
         ]
         read_only_fields = [
             "id",
@@ -187,6 +190,20 @@ class OrganizationViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             ]
             if not is_cloud():
                 create_permissions.append(PremiumMultiorganizationPermission())
+            return create_permissions
+
+        if self.action == "update":
+            create_permissions = [
+                permission()
+                for permission in [permissions.IsAuthenticated, TimeSensitiveActionPermission, APIScopePermission]
+            ]
+
+            if "members_can_invite" in self.request.data:
+                create_permissions.append(OrganizationInviteSettingsPermission())
+
+            if not is_cloud():
+                create_permissions.append(PremiumMultiorganizationPermission())
+
             return create_permissions
 
         # We don't override for other actions
