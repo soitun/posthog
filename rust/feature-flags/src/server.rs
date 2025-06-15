@@ -3,15 +3,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_database::get_pool;
 use common_geoip::GeoIpClient;
 use common_redis::RedisClient;
 use health::{HealthHandle, HealthRegistry};
 use limiters::redis::{QuotaResource, RedisLimiter, ServiceName, QUOTA_LIMITER_CACHE_KEY};
 use tokio::net::TcpListener;
 
-use crate::client::database::get_pool;
-
-use crate::cohort::cohort_cache_manager::CohortCacheManager;
+use crate::cohorts::cohort_cache_manager::CohortCacheManager;
 use crate::config::Config;
 use crate::router;
 use common_cookieless::CookielessManager;
@@ -23,7 +22,11 @@ where
     let redis_client = match RedisClient::new(config.redis_url.clone()) {
         Ok(client) => Arc::new(client),
         Err(e) => {
-            tracing::error!("Failed to create Redis client: {}", e);
+            tracing::error!(
+                "Failed to create Redis client for URL {}: {}",
+                config.redis_url,
+                e
+            );
             return;
         }
     };
@@ -68,7 +71,11 @@ where
     let geoip_service = match GeoIpClient::new(config.get_maxmind_db_path()) {
         Ok(service) => Arc::new(service),
         Err(e) => {
-            tracing::error!("Failed to create GeoIP service: {}", e);
+            tracing::error!(
+                "Failed to create GeoIP service with DB path {}: {}",
+                config.get_maxmind_db_path().display(),
+                e
+            );
             return;
         }
     };

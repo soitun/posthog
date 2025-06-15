@@ -18,7 +18,7 @@ from posthog.auth import (
     SharingAccessTokenAuthentication,
 )
 from posthog.models.organization import Organization
-from posthog.models.scopes import APIScopeObjectOrNotSupported
+from posthog.scopes import APIScopeObjectOrNotSupported
 from posthog.models.project import Project
 from posthog.models.team import Team
 from posthog.models.user import User
@@ -53,6 +53,9 @@ class TeamAndOrgViewSetMixin(_GenericViewSet):  # TODO: Rename to include "Env" 
     # This flag disables nested routing handling, reverting to the old request.user.team behavior
     # Allows for a smoother transition from the old flat API structure to the newer nested one
     param_derived_from_user_current_team: Optional[Literal["team_id", "project_id"]] = None
+    # Welp. This is a kludge to avoid the kludge installed during the environments' migration. The File System API
+    # needs access to the team_id in the URL, but this kludge overrides it. Unkludge the kludge.
+    _skip_team_id_override_kludge: bool = False
 
     # Rewrite filter queries, so that for example foreign keys can be accessed
     # Example: {"team_id": "foo__team_id"} will make the viewset filtered by obj.foo.team_id instead of obj.team_id
@@ -184,7 +187,8 @@ class TeamAndOrgViewSetMixin(_GenericViewSet):  # TODO: Rename to include "Env" 
         include_all_if_admin = self.request.GET.get("admin_include_all") == "true"
 
         # Additionally "projects" is a special one where we always want to include all projects if you're an org admin
-        if self.scope_object == "project":
+        # "insights" is a special one where we always want to include all insights if you're an org admin because the insights retrieve uses a list call :|
+        if self.scope_object == "project" or self.scope_object == "insight":
             include_all_if_admin = True
 
         return self.user_access_control.filter_queryset_by_access_level(
@@ -235,11 +239,11 @@ class TeamAndOrgViewSetMixin(_GenericViewSet):  # TODO: Rename to include "Env" 
 
     @cached_property
     def team_id(self) -> int:
-        if self._is_project_view:
+        if self._is_project_view and not self._skip_team_id_override_kludge:
             team_id = self.project_id  # KLUDGE: This is just for the period of transition to project environments
         elif team_from_token := self._get_team_from_request():
             team_id = team_from_token.id
-        elif self.param_derived_from_user_current_team == "team_id":
+        elif self.param_derived_from_user_current_team == "team_id" or self._skip_team_id_override_kludge:
             user = cast(User, self.request.user)
             team = user.team
             assert team is not None
@@ -253,11 +257,11 @@ class TeamAndOrgViewSetMixin(_GenericViewSet):  # TODO: Rename to include "Env" 
     def team(self) -> Team:
         if team_from_token := self._get_team_from_request():
             team = team_from_token
-        elif self._is_project_view:
+        elif self._is_project_view and not self._skip_team_id_override_kludge:
             team = Team.objects.get(
                 id=self.project_id  # KLUDGE: This is just for the period of transition to project environments
             )
-        elif self.param_derived_from_user_current_team == "team_id":
+        elif self.param_derived_from_user_current_team == "team_id" or self._skip_team_id_override_kludge:
             user = cast(User, self.request.user)
             assert user.team is not None
             team = user.team

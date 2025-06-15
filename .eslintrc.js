@@ -29,7 +29,12 @@ module.exports = {
         },
         'import/resolver': {
             node: {
-                paths: ['./common/eslint_rules', '../common/eslint_rules', '../../common/eslint_rules', '../../../common/eslint_rules'], // Add the directory containing your custom rules
+                paths: [
+                    './common/eslint_rules',
+                    '../common/eslint_rules',
+                    '../../common/eslint_rules',
+                    '../../../common/eslint_rules',
+                ], // Add the directory containing your custom rules
                 extensions: ['.js', '.jsx', '.ts', '.tsx'], // Ensure ESLint resolves both JS and TS files
             },
         },
@@ -126,6 +131,14 @@ module.exports = {
                     {
                         name: 'dayjs',
                         message: 'Do not directly import dayjs. Only import the dayjs exported from lib/dayjs.',
+                    },
+                    {
+                        name: 'chart.js',
+                        message: "Do not directly import chart.js. Only import the Chart and friends exported from lib/Chart.",
+                    },
+                    {
+                        name: 'chart.js/auto',
+                        message: "Do not directly import chart.js/auto. Only import the Chart and friends exported from lib/Chart.",
                     },
                 ],
             },
@@ -286,6 +299,7 @@ module.exports = {
         'react-google-translate/no-conditional-text-nodes-with-siblings': 'warn',
         'react-google-translate/no-return-text-nodes': 'warn',
         'posthog/no-schema-index-import': 'error',
+        'posthog/no-survey-string-constants': 'warn',
     },
     overrides: [
         {
@@ -375,9 +389,16 @@ module.exports = {
             files: './common/eslint_rules/*',
             rules: {
                 '@typescript-eslint/no-var-requires': 'off',
+                'posthog/no-survey-string-constants': 'off',
             },
             env: {
                 node: true,
+            },
+        },
+        {
+            files: ['frontend/src/types.ts'],
+            rules: {
+                'posthog/no-survey-string-constants': 'off',
             },
         },
     ],
