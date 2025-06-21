@@ -16,8 +16,9 @@ import { maxGlobalLogic, ToolDefinition } from './maxGlobalLogic'
 interface MaxToolProps extends ToolDefinition {
     /** The child element(s) that will be wrapped by this component */
     children: React.ReactElement | (({ toolAvailable }: { toolAvailable: boolean }) => React.ReactElement)
-    initialMaxPrompt: string
+    initialMaxPrompt?: string
     onMaxOpen?: () => void
+    className?: string
 }
 
 function generateBurstPoints(spikeCount: number, spikiness: number): string {
@@ -47,10 +48,12 @@ export function MaxTool({
     name,
     displayName,
     context,
+    introOverride,
     callback,
     children: Children,
     initialMaxPrompt,
     onMaxOpen,
+    className,
 }: MaxToolProps): JSX.Element {
     const { registerTool, deregisterTool } = useActions(maxGlobalLogic)
     const { user } = useValues(userLogic)
@@ -61,11 +64,11 @@ export function MaxTool({
     const isMaxOpen = isMaxAvailable && sidePanelOpen && selectedTab === SidePanelTab.Max
 
     useEffect(() => {
-        registerTool({ name, displayName, context, callback })
+        registerTool({ name, displayName, context, introOverride, callback })
         return () => {
             deregisterTool(name)
         }
-    }, [name, displayName, JSON.stringify(context), callback, registerTool, deregisterTool])
+    }, [name, displayName, JSON.stringify(context), introOverride, callback, registerTool, deregisterTool])
 
     let content: JSX.Element
     if (!isMaxAvailable) {
@@ -117,10 +120,12 @@ export function MaxTool({
     }
     return (
         <div
-            className={
+            className={clsx(
+                'relative flex flex-col',
                 // Rounding is +1px to account for the border
-                isMaxOpen ? 'border border-primary-3000 border-dashed -m-px rounded-[calc(var(--radius)+1px)]' : ''
-            }
+                isMaxOpen && 'border border-primary-3000 border-dashed -m-px rounded-[calc(var(--radius)+1px)]',
+                className
+            )}
         >
             {content}
         </div>

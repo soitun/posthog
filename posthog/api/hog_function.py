@@ -1,6 +1,6 @@
 import json
 from typing import Optional, cast
-from common.hogvm.python.execute import validate_bytecode
+from posthog.exceptions_capture import capture_exception
 import structlog
 from django_filters.rest_framework import DjangoFilterBackend
 from django_filters import BaseInFilter, CharFilter, FilterSet
@@ -44,6 +44,7 @@ from posthog.models.hog_functions.hog_function import (
 from posthog.models.plugin import TranspilerError
 from posthog.plugins.plugin_server_api import create_hog_invocation_test
 from django.conf import settings
+from posthog.models.hog_function_template import HogFunctionTemplate as DBHogFunctionTemplate
 
 # Maximum size of HOG code as a string in bytes (100KB)
 MAX_HOG_CODE_SIZE_BYTES = 100 * 1024
@@ -106,6 +107,7 @@ class HogFunctionSerializer(HogFunctionMinimalSerializer):
     inputs = InputsSerializer(required=False)
     mappings = serializers.ListField(child=MappingsSerializer(), required=False, allow_null=True)
     filters = HogFunctionFiltersSerializer(required=False)
+    _create_in_folder = serializers.CharField(required=False, allow_blank=True, write_only=True)
 
     class Meta:
         model = HogFunction
@@ -132,6 +134,7 @@ class HogFunctionSerializer(HogFunctionMinimalSerializer):
             "template_id",
             "status",
             "execution_order",
+            "_create_in_folder",
         ]
         read_only_fields = [
             "id",
@@ -176,19 +179,21 @@ class HogFunctionSerializer(HogFunctionMinimalSerializer):
         self.context["encrypted_inputs"] = instance.encrypted_inputs if instance else {}
 
         template = HogFunctionTemplates.template(data["template_id"]) if data["template_id"] else None
+        if not template:
+            properties = {"team_id": team.id, "template_id": data.get("template_id")}
+            if instance and instance.id:
+                properties["hog_function_id"] = instance.id
+            capture_exception(
+                Exception(f"No template found for id '{data['template_id']}'"), additional_properties=properties
+            )
 
         if data["type"] == "transformation":
-            allowed_teams = [int(team_id) for team_id in settings.HOG_TRANSFORMATIONS_CUSTOM_ENABLED_TEAMS]
-            if team.id not in allowed_teams:
+            if not settings.HOG_TRANSFORMATIONS_CUSTOM_ENABLED:
                 if not template:
                     raise serializers.ValidationError(
                         {"template_id": "Transformation functions must be created from a template."}
                     )
-                # Currently we do not allow modifying the core transformation templates when transformations are disabled
-                data["hog"] = template.hog
-                data["inputs_schema"] = template.inputs_schema
-
-        if not has_addon:
+        elif not has_addon:
             if not bypass_addon_check:
                 # If they don't have the addon, they can only use free templates and can't modify them
                 if not template:
@@ -196,7 +201,7 @@ class HogFunctionSerializer(HogFunctionMinimalSerializer):
                         {"template_id": "The Data Pipelines addon is required to create custom functions."}
                     )
 
-                if not template.free and not instance:
+                if not template.free and data["type"] != "internal_destination" and not instance:
                     raise serializers.ValidationError(
                         {"template_id": "The Data Pipelines addon is required for this template."}
                     )
@@ -293,12 +298,6 @@ class HogFunctionSerializer(HogFunctionMinimalSerializer):
                 attrs["bytecode"] = compile_hog(attrs["hog"], hog_type)
                 attrs["transpiled"] = None
 
-                # Test execution to catch memory/execution exceptions only for transformations
-                if hog_type == "transformation":
-                    is_valid, error_message = validate_bytecode(attrs["bytecode"], attrs.get("inputs", {}))
-                    if not is_valid:
-                        raise serializers.ValidationError({"hog": error_message})
-
         if is_create:
             if not attrs.get("hog"):
                 raise serializers.ValidationError({"hog": "Required."})
@@ -328,23 +327,53 @@ class HogFunctionSerializer(HogFunctionMinimalSerializer):
         request = self.context["request"]
         validated_data["created_by"] = request.user
 
-        # Set execution_order for transformation type
+        template_id = validated_data.get("template_id")
+        if template_id:
+            db_template = DBHogFunctionTemplate.get_template(template_id)
+            if not db_template:
+                raise serializers.ValidationError({"template_id": f"No template found for id '{template_id}'"})
+            validated_data["hog_function_template"] = db_template
+
+        # Handle execution_order for transformation type
         if validated_data.get("type") == "transformation":
-            # Get the highest execution_order for existing transformations
-            highest_order = (
-                HogFunction.objects.filter(team_id=validated_data["team"].id, type="transformation", deleted=False)
-                .order_by("-execution_order")
-                .values_list("execution_order", flat=True)
-                .first()
-            )
+            requested_order = validated_data.get("execution_order")
 
-            # Set to 1 if no existing transformations, otherwise increment by 1
-            validated_data["execution_order"] = (highest_order or 0) + 1
+            # For transformations, we need to determine the execution_order
+            if requested_order is None:
+                # If no order specified, add at the end
+                highest_order = self._get_highest_execution_order(validated_data["team"].id)
+                validated_data["execution_order"] = highest_order + 1
 
-        hog_function = super().create(validated_data=validated_data)
-        return hog_function
+            # Create the function with the execution_order
+            return super().create(validated_data=validated_data)
+        else:
+            # For non-transformation types, just create normally
+            return super().create(validated_data=validated_data)
+
+    def _get_highest_execution_order(self, team_id: int) -> int:
+        """Get the highest execution_order for transformations in a team."""
+        highest_order = (
+            HogFunction.objects.filter(team_id=team_id, type="transformation", deleted=False)
+            .order_by("-execution_order")
+            .values_list("execution_order", flat=True)
+            .first()
+        )
+        return highest_order or 0
 
     def update(self, instance: HogFunction, validated_data: dict, *args, **kwargs) -> HogFunction:
+        # Handle undeletion or re-enabling by placing at the end when needed
+        if instance.type == "transformation" and (
+            (instance.deleted and validated_data.get("deleted") is False)
+            or (
+                not instance.enabled
+                and validated_data.get("enabled") is True
+                and "execution_order" not in validated_data
+            )
+        ):
+            highest_order = self._get_highest_execution_order(instance.team_id)
+            validated_data["execution_order"] = highest_order + 1
+
+        # Standard update
         res: HogFunction = super().update(instance, validated_data)
 
         if res.enabled and res.status.get("state", 0) >= HogFunctionState.DISABLED_TEMPORARILY.value:
@@ -394,27 +423,39 @@ class HogFunctionViewSet(
             queryset = queryset.filter(deleted=False)
 
         if self.action == "list":
-            queryset = queryset.order_by("execution_order", "created_at")
+            queryset = queryset.order_by("execution_order", "-updated_at")
+
+        final_filter_groups = []
+
+        if self.request.GET.get("filter_groups"):
+            try:
+                filter_groups = json.loads(self.request.GET["filter_groups"])
+                if not isinstance(filter_groups, list):
+                    raise ValueError("filter_groups must be a list")
+
+                for filter_group in filter_groups:
+                    final_filter_groups.append(filter_group)
+
+            except (ValueError, KeyError, TypeError):
+                raise exceptions.ValidationError({"filter_groups": "Invalid filter_groups"})
 
         if self.request.GET.get("filters"):
             try:
                 filters = json.loads(self.request.GET["filters"])
-                if "actions" in filters:
-                    action_ids = [str(action.get("id")) for action in filters.get("actions", []) if action.get("id")]
-                    del filters["actions"]
-                    query = """
-                        EXISTS (
-                            SELECT 1
-                            FROM jsonb_array_elements(filters->'actions') AS elem
-                            WHERE elem->>'id' = ANY(%s)
-                        )
-                    """
-                    queryset = queryset.extra(where=[query], params=[action_ids])
-
-                if filters:
-                    queryset = queryset.filter(filters__contains=filters)
+                final_filter_groups.append(filters)
             except (ValueError, KeyError, TypeError):
-                raise exceptions.ValidationError({"filter": f"Invalid filter"})
+                raise exceptions.ValidationError({"filters": "Invalid filters"})
+
+        if final_filter_groups:
+            from django.db.models import Q
+
+            combined_q = Q()
+
+            for filter_group in final_filter_groups:
+                if filter_group:
+                    combined_q |= Q(filters__contains=filter_group)
+
+            queryset = queryset.filter(combined_q)
 
         return queryset
 

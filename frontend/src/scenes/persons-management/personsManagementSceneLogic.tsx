@@ -1,13 +1,12 @@
 import { LemonButton } from '@posthog/lemon-ui'
 import { actions, connect, kea, path, reducers, selectors } from 'kea'
 import { actionToUrl, router, urlToAction } from 'kea-router'
-import { FEATURE_FLAGS } from 'lib/constants'
 import { GroupsAccessStatus } from 'lib/introductions/groupsAccessLogic'
 import { LemonTab } from 'lib/lemon-ui/LemonTabs'
-import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { capitalizeFirstLetter } from 'lib/utils'
 import { Cohorts } from 'scenes/cohorts/Cohorts'
 import { Groups } from 'scenes/groups/Groups'
+import { groupsSceneLogic } from 'scenes/groups/groupsSceneLogic'
 import { Scene } from 'scenes/sceneTypes'
 import { urls } from 'scenes/urls'
 
@@ -20,9 +19,10 @@ import { Persons } from './tabs/Persons'
 export type PersonsManagementTab = {
     key: string
     url: string
-    label: string
+    label: string | JSX.Element
     content: any
     buttons?: any
+    tooltipDocLink?: string
 }
 
 export type PersonsManagementTabs = Record<
@@ -32,14 +32,10 @@ export type PersonsManagementTabs = Record<
 
 export const personsManagementSceneLogic = kea<personsManagementSceneLogicType>([
     path(['scenes', 'persons-management', 'personsManagementSceneLogic']),
-    connect({
-        values: [
-            groupsModel,
-            ['aggregationLabel', 'groupTypes', 'groupTypesLoading', 'groupsAccessStatus'],
-            featureFlagLogic,
-            ['featureFlags'],
-        ],
-    }),
+    connect(() => ({
+        actions: [groupsSceneLogic, ['setGroupTypeIndex']],
+        values: [groupsModel, ['aggregationLabel', 'groupTypes', 'groupTypesLoading', 'groupsAccessStatus']],
+    })),
     actions({
         setTabKey: (tabKey: string) => ({ tabKey }),
     }),
@@ -53,14 +49,15 @@ export const personsManagementSceneLogic = kea<personsManagementSceneLogicType>(
     }),
     selectors({
         tabs: [
-            (s) => [s.groupTabs, s.featureFlags],
-            (groupTabs, featureFlags): PersonsManagementTab[] => {
+            (s) => [s.groupTabs],
+            (groupTabs): PersonsManagementTab[] => {
                 return [
                     {
                         key: 'persons',
                         url: urls.persons(),
-                        label: 'Persons',
+                        label: 'People',
                         content: <Persons />,
+                        tooltipDocLink: 'https://posthog.com/docs/data/persons',
                     },
                     {
                         key: 'cohorts',
@@ -76,8 +73,9 @@ export const personsManagementSceneLogic = kea<personsManagementSceneLogicType>(
                                 New cohort
                             </LemonButton>
                         ),
+                        tooltipDocLink: 'https://posthog.com/docs/data/cohorts',
                     },
-                    ...(featureFlags[FEATURE_FLAGS.B2B_ANALYTICS] ? [] : groupTabs),
+                    ...groupTabs,
                 ]
             },
         ],
@@ -157,7 +155,7 @@ export const personsManagementSceneLogic = kea<personsManagementSceneLogicType>(
             return [tabUrl, router.values.searchParams, router.values.hashParams, { replace: true }]
         },
     })),
-    urlToAction(({ actions, values }) => {
+    urlToAction(({ actions }) => {
         const urlToAction = {
             [urls.persons()]: () => {
                 actions.setTabKey('persons')
@@ -166,10 +164,9 @@ export const personsManagementSceneLogic = kea<personsManagementSceneLogicType>(
                 actions.setTabKey('cohorts')
             },
         } as Record<string, (...args: any[]) => void>
-        if (!values.featureFlags[FEATURE_FLAGS.B2B_ANALYTICS]) {
-            urlToAction[urls.groups(':key')] = ({ key }: { key: string }) => {
-                actions.setTabKey(`groups-${key}`)
-            }
+        urlToAction[urls.groups(':key')] = ({ key }: { key: string }) => {
+            actions.setTabKey(`groups-${key}`)
+            actions.setGroupTypeIndex(parseInt(key))
         }
         return urlToAction
     }),

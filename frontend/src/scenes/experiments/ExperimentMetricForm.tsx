@@ -1,13 +1,21 @@
 import { DataWarehousePopoverField } from 'lib/components/TaxonomicFilter/types'
-import { LemonInput } from 'lib/lemon-ui/LemonInput'
 import { LemonLabel } from 'lib/lemon-ui/LemonLabel'
 import { LemonRadio } from 'lib/lemon-ui/LemonRadio'
 import { ActionFilter } from 'scenes/insights/filters/ActionFilter/ActionFilter'
 
 import { Query } from '~/queries/Query/Query'
-import { ExperimentMetric, ExperimentMetricType, NodeKind } from '~/queries/schema/schema-general'
+import {
+    ExperimentMetric,
+    ExperimentMetricType,
+    isExperimentFunnelMetric,
+    isExperimentMeanMetric,
+    NodeKind,
+} from '~/queries/schema/schema-general'
 import { FilterType } from '~/types'
 
+import { ExperimentMetricConversionWindowFilter } from './ExperimentMetricConversionWindowFilter'
+import { ExperimentMetricFunnelOrderSelector } from './ExperimentMetricFunnelOrderSelector'
+import { ExperimentMetricOutlierHandling } from './ExperimentMetricOutlierHandling'
 import { commonActionFilterProps } from './Metrics/Selectors'
 import {
     filterToMetricConfig,
@@ -59,6 +67,38 @@ export function ExperimentMetricForm({
         }
     }
 
+    const handleMetricTypeChange = (newMetricType: ExperimentMetricType): void => {
+        handleSetMetric(getDefaultExperimentMetric(newMetricType))
+    }
+
+    const radioOptions = [
+        {
+            value: ExperimentMetricType.FUNNEL,
+            label: 'Funnel',
+            description:
+                'Calculates the percentage of users for whom the metric occurred at least once, useful for measuring conversion rates.',
+        },
+        {
+            value: ExperimentMetricType.MEAN,
+            label: 'Mean',
+            description:
+                'Tracks the value of the metric per user, useful for measuring count of clicks, revenue, or other numeric metrics such as session length.',
+        },
+    ]
+
+    const metricFilter = metricToFilter(metric)
+    const previewQuery = metricToQuery(metric, filterTestAccounts)
+
+    const queryConfig = {
+        kind: NodeKind.InsightVizNode,
+        source: previewQuery,
+        showTable: false,
+        showLastComputation: true,
+        showLastComputationRefresh: false,
+    }
+
+    const hideDeleteBtn = (_: any, index: number): boolean => index === 0
+
     return (
         <div className="deprecated-space-y-4">
             <div>
@@ -66,23 +106,8 @@ export function ExperimentMetricForm({
                 <LemonRadio
                     data-attr="metrics-selector"
                     value={metric.metric_type}
-                    onChange={(newMetricType: ExperimentMetricType) => {
-                        handleSetMetric(getDefaultExperimentMetric(newMetricType))
-                    }}
-                    options={[
-                        {
-                            value: ExperimentMetricType.FUNNEL,
-                            label: 'Funnel',
-                            description:
-                                'Calculates the percentage of users for whom the metric occurred at least once, useful for measuring conversion rates.',
-                        },
-                        {
-                            value: ExperimentMetricType.MEAN,
-                            label: 'Mean',
-                            description:
-                                'Tracks the value of the metric per user, useful for measuring count of clicks, revenue, or other numeric metrics such as session length.',
-                        },
-                    ]}
+                    onChange={handleMetricTypeChange}
+                    options={radioOptions}
                 />
             </div>
             <div>
@@ -91,7 +116,7 @@ export function ExperimentMetricForm({
                 {metric.metric_type === ExperimentMetricType.MEAN && (
                     <ActionFilter
                         bordered
-                        filters={metricToFilter(metric)}
+                        filters={metricFilter}
                         setFilters={handleSetFilters}
                         typeKey="experiment-metric"
                         buttonCopy="Add graph series"
@@ -109,12 +134,13 @@ export function ExperimentMetricForm({
                 {metric.metric_type === ExperimentMetricType.FUNNEL && (
                     <ActionFilter
                         bordered
-                        filters={metricToFilter(metric)}
+                        filters={metricFilter}
                         setFilters={handleSetFilters}
                         typeKey="experiment-metric"
                         buttonCopy="Add step"
                         showSeriesIndicator={false}
                         hideRename={true}
+                        hideDeleteBtn={hideDeleteBtn}
                         sortable={true}
                         showNestedArrow={true}
                         // showNumericalPropsOnly={true}
@@ -125,88 +151,34 @@ export function ExperimentMetricForm({
                     />
                 )}
             </div>
-            {/* :KLUDGE: Query chart type is inferred from the initial state, so need to render Trends and Funnels separately */}
-            {metric.metric_type === ExperimentMetricType.MEAN &&
-                metric.source.kind !== NodeKind.ExperimentDataWarehouseNode && (
-                    <Query
-                        query={{
-                            kind: NodeKind.InsightVizNode,
-                            source: metricToQuery(metric, filterTestAccounts),
-                            showTable: false,
-                            showLastComputation: true,
-                            showLastComputationRefresh: false,
-                        }}
-                        readOnly
-                    />
-                )}
-            {metric.metric_type === ExperimentMetricType.FUNNEL && (
-                <Query
-                    query={{
-                        kind: NodeKind.InsightVizNode,
-                        source: metricToQuery(metric, filterTestAccounts),
-                        showTable: false,
-                        showLastComputation: true,
-                        showLastComputationRefresh: false,
-                    }}
-                    readOnly
-                />
+            <ExperimentMetricConversionWindowFilter metric={metric} handleSetMetric={handleSetMetric} />
+            {isExperimentFunnelMetric(metric) && (
+                <ExperimentMetricFunnelOrderSelector metric={metric} handleSetMetric={handleSetMetric} />
+            )}
+            {isExperimentMeanMetric(metric) && (
+                <ExperimentMetricOutlierHandling metric={metric} handleSetMetric={handleSetMetric} />
             )}
             <div>
                 <LemonLabel
                     className="mb-1"
                     info={
                         <>
-                            Controls how long a metric value is considered relevant to an experiment exposure:
-                            <ul className="list-disc pl-4">
-                                <li>
-                                    <strong>Experiment duration</strong> considers any data from when a user is first
-                                    exposed until the experiment ends.
-                                </li>
-                                <li>
-                                    <strong>Conversion window</strong> only includes data that occurs within the
-                                    specified number of hours after a user's first exposure (also ignoring the
-                                    experiment end date).
-                                </li>
-                            </ul>
+                            The preview uses data from the past 14 days to show how the metric will appear.
+                            <br />
+                            For funnel metrics, we simulate experiment exposure by inserting a page-view event at the
+                            start of the funnel. In the experiment evaluation, this will be replaced by the actual
+                            experiment-exposure event.
                         </>
                     }
                 >
-                    Time window
+                    Preview
                 </LemonLabel>
-                <div className="flex items-center gap-2">
-                    <LemonRadio
-                        className="my-1.5"
-                        value={metric.time_window_hours === undefined ? 'full' : 'conversion'}
-                        orientation="horizontal"
-                        onChange={(value) =>
-                            handleSetMetric({
-                                ...metric,
-                                time_window_hours: value === 'full' ? undefined : 72,
-                            })
-                        }
-                        options={[
-                            {
-                                value: 'full',
-                                label: 'Experiment duration',
-                            },
-                            {
-                                value: 'conversion',
-                                label: 'Conversion window',
-                            },
-                        ]}
-                    />
-                    {metric.time_window_hours !== undefined && (
-                        <LemonInput
-                            value={metric.time_window_hours}
-                            onChange={(value) => handleSetMetric({ ...metric, time_window_hours: value || undefined })}
-                            type="number"
-                            step={1}
-                            suffix={<span className="text-sm">hours</span>}
-                            size="small"
-                        />
-                    )}
-                </div>
             </div>
+            {/* :KLUDGE: Query chart type is inferred from the initial state, so need to render Trends and Funnels separately */}
+            {isExperimentMeanMetric(metric) && metric.source.kind !== NodeKind.ExperimentDataWarehouseNode && (
+                <Query query={queryConfig} readOnly />
+            )}
+            {isExperimentFunnelMetric(metric) && <Query query={queryConfig} readOnly />}
         </div>
     )
 }

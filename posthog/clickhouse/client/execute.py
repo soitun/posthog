@@ -1,38 +1,49 @@
 import json
+import logging
 import threading
+import traceback
 import types
 from collections.abc import Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from functools import lru_cache
 from time import perf_counter
 from typing import Any, Optional, Union
 
-import posthoganalytics
 import sqlparse
-from cachetools import cached, TTLCache
 from clickhouse_driver import Client as SyncClient
 from django.conf import settings as app_settings
-from prometheus_client import Counter, Gauge
-from sentry_sdk import set_tag
+from prometheus_client import Counter
 
-from posthog.clickhouse.client.connection import Workload, get_client_from_pool
+from posthog.clickhouse.client.connection import (
+    Workload,
+    get_client_from_pool,
+    get_default_clickhouse_workload_type,
+    ClickHouseUser,
+)
 from posthog.clickhouse.client.escape import substitute_params
-from posthog.clickhouse.query_tagging import get_query_tag_value, get_query_tags
+from posthog.clickhouse.query_tagging import tag_queries, get_query_tag_value, get_query_tags
 from posthog.cloud_utils import is_cloud
-from posthog.errors import wrap_query_error
-from posthog.settings import TEST
+from posthog.errors import wrap_query_error, ch_error_type
+from posthog.exceptions import ClickhouseAtCapacity
+from posthog.settings import CLICKHOUSE_PER_TEAM_QUERY_SETTINGS, TEST, API_QUERIES_ON_ONLINE_CLUSTER
 from posthog.utils import generate_short_id, patchable
+
+QUERY_STARTED_COUNTER = Counter(
+    "posthog_clickhouse_query_sent",
+    "Number of queries sent to ClickHouse to be run.",
+    labelnames=["team_id", "access_method", "chargeable"],
+)
+
+QUERY_FINISHED_COUNTER = Counter(
+    "posthog_clickhouse_query_finished",
+    "Number of queries finished successfully.",
+    labelnames=["team_id", "access_method", "chargeable"],
+)
 
 QUERY_ERROR_COUNTER = Counter(
     "clickhouse_query_failure",
     "Query execution failure signal is dispatched when a query fails.",
-    labelnames=["exception_type", "query_type"],
-)
-
-QUERY_EXECUTION_TIME_GAUGE = Gauge(
-    "clickhouse_query_execution_time",
-    "Clickhouse query execution time",
-    labelnames=["query_type"],
+    labelnames=["exception_type", "query_type", "workload", "chargeable"],
 )
 
 InsertParams = Union[list, tuple, types.GeneratorType]
@@ -90,12 +101,7 @@ def validated_client_query_id() -> Optional[str]:
     return f"{client_query_team_id}_{client_query_id}_{random_id}"
 
 
-@cached(cache=TTLCache(maxsize=1, ttl=600))
-def get_api_queries_online_allow_list() -> set[int]:
-    with suppress(Exception):
-        cfg = json.loads(posthoganalytics.get_remote_config_payload("api-queries-on-online-cluster"))
-        return set(cfg.get("allowed_team_id", [])) if cfg else set[int]()
-    return set[int]()
+logger = logging.getLogger(__name__)
 
 
 @patchable
@@ -110,7 +116,12 @@ def sync_execute(
     team_id: Optional[int] = None,
     readonly=False,
     sync_client: Optional[SyncClient] = None,
+    ch_user: ClickHouseUser = ClickHouseUser.DEFAULT,
 ):
+    if not workload:
+        workload = Workload.DEFAULT
+        # TODO replace this by assert, sorry, no messing with ClickHouse should be possible
+        logging.warning(f"workload is None", traceback.format_stack())
     if TEST and flush:
         try:
             from posthog.test.base import flush_persons_and_events
@@ -119,73 +130,113 @@ def sync_execute(
         except ModuleNotFoundError:  # when we run plugin server tests it tries to run above, ignore
             pass
 
-    if workload == Workload.DEFAULT and (
-        # When someone uses an API key, always put their query to the offline cluster
-        get_query_tag_value("access_method") == "personal_api_key"
-        or
-        # Execute all celery tasks not directly set to be online on the offline cluster
-        get_query_tag_value("kind") == "celery"
-    ):
+    is_personal_api_key = get_query_tag_value("access_method") == "personal_api_key"
+
+    # When someone uses an API key, always put their query to the offline cluster
+    # Execute all celery tasks not directly set to be online on the offline cluster
+    if workload == Workload.DEFAULT and (is_personal_api_key or get_query_tag_value("kind") == "celery"):
         workload = Workload.OFFLINE
 
+    tag_id: str = get_query_tag_value("id") or ""
     # Make sure we always have process_query_task on the online cluster
-    if get_query_tag_value("id") == "posthog.tasks.tasks.process_query_task":
+    if tag_id == "posthog.tasks.tasks.process_query_task":
         workload = Workload.ONLINE
+        ch_user = ClickHouseUser.APP
 
+    chargeable = get_query_tag_value("chargeable") or 0
     # Customer is paying for API
     if (
         team_id
         and workload == Workload.OFFLINE
-        and get_query_tag_value("chargeable")
+        and chargeable
         and is_cloud()
-        and team_id in get_api_queries_online_allow_list()
+        and team_id in API_QUERIES_ON_ONLINE_CLUSTER
     ):
         workload = Workload.ONLINE
 
-    start_time = perf_counter()
+    if workload == Workload.DEFAULT:
+        workload = get_default_clickhouse_workload_type()
+
+    if team_id is not None:
+        tag_queries(team_id=team_id)
 
     prepared_sql, prepared_args, tags = _prepare_query(query=query, args=args, workload=workload)
     query_id = validated_client_query_id()
-    core_settings = {**default_settings(), **(settings or {})}
-    tags["query_settings"] = core_settings
-
-    query_type = tags.get("query_type", "Other")
-    set_tag("query_type", query_type)
-    if team_id is not None:
-        set_tag("team_id", team_id)
-
-    settings = {
-        **core_settings,
-        "log_comment": json.dumps(tags, separators=(",", ":")),
-        "query_id": query_id,
+    core_settings = {
+        **default_settings(),
+        **CLICKHOUSE_PER_TEAM_QUERY_SETTINGS.get(str(team_id), {}),
+        **(settings or {}),
     }
+    tags["query_settings"] = core_settings
+    query_type = tags.get("query_type", "Other")
+    if ch_user == ClickHouseUser.DEFAULT:
+        if is_personal_api_key:
+            ch_user = ClickHouseUser.API
+        elif tags.get("kind", "") == "request" and "api/" in tag_id and "capture" not in tag_id:
+            # process requests made to API from the PH app
+            ch_user = ClickHouseUser.APP
 
-    try:
-        with sync_client or get_client_from_pool(workload, team_id, readonly) as client:
-            result = client.execute(
-                prepared_sql,
-                params=prepared_args,
-                settings=settings,
-                with_column_types=with_column_types,
-                query_id=query_id,
-            )
-    except Exception as e:
-        err = wrap_query_error(e)
-        exception_type = type(err).__name__
-        set_tag("clickhouse_exception_type", exception_type)
-        QUERY_ERROR_COUNTER.labels(exception_type=exception_type, query_type=query_type).inc()
+    while True:
+        settings = {
+            **core_settings,
+            "log_comment": json.dumps(tags, separators=(",", ":")),
+            "query_id": query_id,
+        }
+        if workload == Workload.OFFLINE:
+            # disabling hedged requests for offline queries reduces the likelihood of these queries bleeding over into the
+            # online resource pool when the offline resource pool is under heavy load. this comes at the cost of higher and
+            # more variable latency and a higher likelihood of query failures - but offline workloads should be tolerant to
+            # these disruptions
+            settings["use_hedged_requests"] = "0"
+        start_time = perf_counter()
+        try:
+            QUERY_STARTED_COUNTER.labels(
+                team_id=str(tags.get("team_id", "0")),
+                access_method=tags.get("access_method", "other"),
+                chargeable=str(tags.get("chargeable", "0")),
+            ).inc()
+            with sync_client or get_client_from_pool(workload, team_id, readonly, ch_user) as client:
+                result = client.execute(
+                    prepared_sql,
+                    params=prepared_args,
+                    settings=settings,
+                    with_column_types=with_column_types,
+                    query_id=query_id,
+                )
+                if "INSERT INTO" in prepared_sql and client.last_query.progress.written_rows > 0:
+                    result = client.last_query.progress.written_rows
+        except Exception as e:
+            exception_type = ch_error_type(e)
+            QUERY_ERROR_COUNTER.labels(
+                exception_type=exception_type,
+                query_type=query_type,
+                workload=workload.value if workload else "None",
+                chargeable=chargeable,
+            ).inc()
+            err = wrap_query_error(e)
+            if isinstance(err, ClickhouseAtCapacity) and is_personal_api_key and workload == Workload.OFFLINE:
+                workload = Workload.ONLINE
+                tags["clickhouse_exception_type"] = exception_type
+                tags["workload"] = str(workload)
+                continue
+            raise err from e
+        finally:
+            execution_time = perf_counter() - start_time
 
-        raise err from e
-    finally:
-        execution_time = perf_counter() - start_time
+            QUERY_FINISHED_COUNTER.labels(
+                team_id=str(tags.get("team_id", "0")),
+                access_method=tags.get("access_method", "other"),
+                chargeable=str(tags.get("chargeable", "0")),
+            ).inc()
 
-        QUERY_EXECUTION_TIME_GAUGE.labels(query_type=query_type).set(execution_time * 1000.0)
+            if query_counter := getattr(thread_local_storage, "query_counter", None):
+                query_counter.total_query_time += execution_time
 
-        if query_counter := getattr(thread_local_storage, "query_counter", None):
-            query_counter.total_query_time += execution_time
+            if app_settings.SHELL_PLUS_PRINT_SQL:
+                print("Execution time: %.6fs" % (execution_time,))  # noqa T201
 
-        if app_settings.SHELL_PLUS_PRINT_SQL:
-            print("Execution time: %.6fs" % (execution_time,))  # noqa T201
+        break
+
     return result
 
 
@@ -275,7 +326,7 @@ def _prepare_query(
     return annotated_sql, prepared_args, tags
 
 
-def _annotate_tagged_query(query, workload):
+def _annotate_tagged_query(query, workload: Workload):
     """
     Adds in a /* */ so we can look in clickhouses `system.query_log`
     to easily marry up to the generating code.

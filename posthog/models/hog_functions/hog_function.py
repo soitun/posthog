@@ -44,23 +44,21 @@ class HogFunctionType(models.TextChoices):
     DESTINATION = "destination"
     SITE_DESTINATION = "site_destination"
     INTERNAL_DESTINATION = "internal_destination"
+    SOURCE_WEBHOOK = "source_webhook"
     SITE_APP = "site_app"
     TRANSFORMATION = "transformation"
-    EMAIL = "email"
-    BROADCAST = "broadcast"
 
 
 TYPES_THAT_RELOAD_PLUGIN_SERVER = (
     HogFunctionType.DESTINATION,
     HogFunctionType.TRANSFORMATION,
     HogFunctionType.INTERNAL_DESTINATION,
-    HogFunctionType.BROADCAST,
+    HogFunctionType.SOURCE_WEBHOOK,
 )
 TYPES_WITH_COMPILED_FILTERS = (
     HogFunctionType.DESTINATION,
     HogFunctionType.INTERNAL_DESTINATION,
     HogFunctionType.TRANSFORMATION,
-    HogFunctionType.BROADCAST,
 )
 TYPES_WITH_TRANSPILED_FILTERS = (HogFunctionType.SITE_DESTINATION, HogFunctionType.SITE_APP)
 TYPES_WITH_JAVASCRIPT_SOURCE = (HogFunctionType.SITE_DESTINATION, HogFunctionType.SITE_APP)
@@ -82,6 +80,9 @@ class HogFunction(FileSystemSyncMixin, UUIDModel):
     enabled = models.BooleanField(default=False)
     type = models.CharField(max_length=24, null=True, blank=True)
 
+    # DEPRECATED: This was an idea that is no longer used
+    kind = models.CharField(max_length=24, null=True, blank=True)
+
     icon_url = models.TextField(null=True, blank=True)
 
     # Hog source, except for the "site_*" types, when it contains TypeScript Source
@@ -99,29 +100,41 @@ class HogFunction(FileSystemSyncMixin, UUIDModel):
     mappings = models.JSONField(null=True, blank=True)
     masking = models.JSONField(null=True, blank=True)
     template_id = models.CharField(max_length=400, null=True, blank=True)
+    hog_function_template = models.ForeignKey(
+        "posthog.HogFunctionTemplate",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="hog_functions",
+    )
     execution_order = models.PositiveSmallIntegerField(null=True, blank=True)
 
     @classmethod
     def get_file_system_unfiled(cls, team: "Team") -> QuerySet["HogFunction"]:
         base_qs = HogFunction.objects.filter(team=team, deleted=False)
-        return cls._filter_unfiled_queryset(base_qs, team, type__startswith="hog/", ref_field="id")
+        return cls._filter_unfiled_queryset(base_qs, team, type__startswith="hog_function/", ref_field="id")
 
     def get_file_system_representation(self) -> FileSystemRepresentation:
+        folder = "Unfiled/Destinations"
+        href = f"/pipeline/destinations/hog-{self.pk}/configuration"
+        type = self.type
+
         if self.type == HogFunctionType.SITE_APP:
             folder = "Unfiled/Site apps"
-            url_type = "site-apps"
+            href = f"/pipeline/site-apps/hog-{self.pk}/configuration"
         elif self.type == HogFunctionType.TRANSFORMATION:
             folder = "Unfiled/Transformations"
-            url_type = "transformations"
-        else:
-            folder = "Unfiled/Destinations"
-            url_type = f"destinations"
+            href = f"/pipeline/transformations/hog-{self.pk}/configuration"
+        elif self.type == HogFunctionType.SOURCE_WEBHOOK:
+            folder = "Unfiled/Sources"
+            href = f"/functions/{self.pk}/configuration"
+
         return FileSystemRepresentation(
-            base_folder=folder,
-            type=f"hog/{self.type}",
+            base_folder=self._get_assigned_folder(folder),
+            type=f"hog_function/{type}",  # sync with APIScopeObject in scopes.py
             ref=str(self.pk),
             name=self.name or "Untitled",
-            href=f"/pipeline/{url_type}/hog-{self.pk}/configuration",
+            href=href,
             meta={
                 "created_at": str(self.created_at),
                 "created_by": self.created_by_id,

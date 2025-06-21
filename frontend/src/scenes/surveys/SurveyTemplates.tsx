@@ -3,7 +3,6 @@ import './SurveyTemplates.scss'
 import { LemonButton } from '@posthog/lemon-ui'
 import { useActions, useValues } from 'kea'
 import { PageHeader } from 'lib/components/PageHeader'
-import { useFeatureFlag } from 'lib/hooks/useFeatureFlag'
 import { eventUsageLogic } from 'lib/utils/eventUsageLogic'
 import { SceneExport } from 'scenes/sceneTypes'
 import { teamLogic } from 'scenes/teamLogic'
@@ -18,6 +17,7 @@ import { surveysLogic } from './surveysLogic'
 
 export const scene: SceneExport = {
     component: SurveyTemplates,
+    settingSectionId: 'environment-surveys',
 }
 
 export function SurveyTemplates(): JSX.Element {
@@ -28,12 +28,8 @@ export function SurveyTemplates(): JSX.Element {
         ...currentTeam?.survey_config?.appearance,
     }
     const { surveysEventsAvailable } = useValues(surveysLogic)
-    const errorTrackingEnabled = useFeatureFlag('ERROR_TRACKING')
 
-    const templates =
-        surveysEventsAvailable && errorTrackingEnabled
-            ? [...defaultSurveyTemplates, errorTrackingSurvey]
-            : defaultSurveyTemplates
+    const templates = surveysEventsAvailable ? [...defaultSurveyTemplates, errorTrackingSurvey] : defaultSurveyTemplates
 
     return (
         <>
@@ -90,6 +86,7 @@ export function SurveyTemplates(): JSX.Element {
                                                     ...template.appearance,
                                                     ...surveyAppearance,
                                                     disabledButtonOpacity: '1',
+                                                    maxWidth: '300px',
                                                 },
                                             } as Survey
                                         }

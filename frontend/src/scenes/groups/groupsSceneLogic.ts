@@ -1,9 +1,5 @@
 import { actions, connect, kea, path, reducers, selectors } from 'kea'
-import { urlToAction } from 'kea-router'
-import { FEATURE_FLAGS } from 'lib/constants'
 import { GroupsAccessStatus } from 'lib/introductions/groupsAccessLogic'
-import { LemonTab } from 'lib/lemon-ui/LemonTabs'
-import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { capitalizeFirstLetter } from 'lib/utils'
 import { Scene } from 'scenes/sceneTypes'
 import { urls } from 'scenes/urls'
@@ -21,18 +17,11 @@ export type GroupsTab = {
     buttons?: any
 }
 
-export type GroupsTabs = Record<string, { url: string; label: LemonTab<any>['label']; content: any; buttons?: any }>
-
 export const groupsSceneLogic = kea<groupsSceneLogicType>([
     path(['scenes', 'groups', 'groupsSceneLogic']),
-    connect({
-        values: [
-            groupsModel,
-            ['aggregationLabel', 'groupTypes', 'groupTypesLoading', 'groupsAccessStatus'],
-            featureFlagLogic,
-            ['featureFlags'],
-        ],
-    }),
+    connect(() => ({
+        values: [groupsModel, ['aggregationLabel', 'groupTypes', 'groupTypesLoading', 'groupsAccessStatus']],
+    })),
     actions({
         setGroupTypeIndex: (groupTypeIndex: number) => ({ groupTypeIndex }),
         setTabKey: (tabKey: string) => ({ tabKey }),
@@ -98,14 +87,5 @@ export const groupsSceneLogic = kea<groupsSceneLogicType>([
                 ].includes(groupsAccessStatus)
             },
         ],
-    }),
-    urlToAction(({ actions, values }) => {
-        const urlToAction = {} as Record<string, (...args: any[]) => void>
-        if (values.featureFlags[FEATURE_FLAGS.B2B_ANALYTICS]) {
-            urlToAction[urls.groups(':key')] = ({ key }: { key: string }) => {
-                actions.setGroupTypeIndex(parseInt(key))
-            }
-        }
-        return urlToAction
     }),
 ])

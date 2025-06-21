@@ -1,7 +1,9 @@
 import json
 from zoneinfo import ZoneInfo
 from posthog.constants import ExperimentNoResultsErrorKeys
+from posthog.clickhouse.query_tagging import tag_queries
 from posthog.hogql import ast
+from posthog.hogql.constants import HogQLGlobalSettings
 from posthog.hogql.modifiers import create_default_modifiers_for_team
 from posthog.hogql.parser import parse_expr
 from posthog.hogql.property import property_to_expr
@@ -25,18 +27,27 @@ from posthog.hogql_queries.experiments.funnels_statistics_v2 import (
     are_results_significant_v2 as are_results_significant_v2_funnel,
     calculate_credible_intervals_v2 as calculate_credible_intervals_v2_funnel,
 )
+
+from posthog.hogql_queries.experiments.utils import (
+    get_frequentist_experiment_result_new_format,
+    get_legacy_funnels_variant_results,
+    get_legacy_trends_variant_results,
+    get_new_variant_results,
+    split_baseline_and_test_variants,
+)
 from posthog.hogql_queries.query_runner import QueryRunner
 from posthog.hogql_queries.utils.query_date_range import QueryDateRange
 from posthog.models.experiment import Experiment
 from posthog.hogql_queries.experiments.base_query_utils import (
+    conversion_window_to_seconds,
     event_or_action_to_filter,
     get_data_warehouse_metric_source,
     get_metric_value,
+    is_continuous,
 )
 from posthog.hogql_queries.experiments.funnel_query_utils import (
+    funnel_evaluation_expr,
     funnel_steps_to_filter,
-    funnel_steps_to_window_funnel_expr,
-    get_funnel_step_level_expr,
 )
 from rest_framework.exceptions import ValidationError
 from posthog.schema import (
@@ -48,6 +59,7 @@ from posthog.schema import (
     ExperimentMeanMetric,
     ExperimentMetricMathType,
     ExperimentQueryResponse,
+    ExperimentStatsBase,
     ExperimentSignificanceCode,
     ExperimentQuery,
     ExperimentVariantFunnelsBaseStats,
@@ -81,8 +93,6 @@ class ExperimentQueryRunner(QueryRunner):
         if self.experiment.holdout:
             self.variants.append(f"holdout-{self.experiment.holdout.id}")
 
-        self.stats_version = 2
-
         self.date_range = self._get_date_range()
         self.date_range_query = QueryDateRange(
             date_range=self.date_range,
@@ -94,6 +104,15 @@ class ExperimentQueryRunner(QueryRunner):
             isinstance(self.query.metric, ExperimentMeanMetric)
             and self.query.metric.source.kind == "ExperimentDataWarehouseNode"
         )
+
+        # Determine which statistical method to use
+        if self.experiment.stats_config is None:
+            # Default to "bayesian" if not specified
+            self.stats_method = "bayesian"
+        else:
+            self.stats_method = self.experiment.stats_config.get("method", "bayesian")
+            if self.stats_method not in ["bayesian", "frequentist"]:
+                self.stats_method = "bayesian"
 
         # Just to simplify access
         self.metric = self.query.metric
@@ -119,7 +138,7 @@ class ExperimentQueryRunner(QueryRunner):
         )
 
     def _get_metric_time_window(self, left: ast.Expr) -> list[ast.CompareOperation]:
-        if self.metric.time_window_hours:
+        if self.metric.conversion_window is not None and self.metric.conversion_window_unit is not None:
             # Define conversion window as hours after exposure
             time_window_clause = ast.CompareOperation(
                 left=left,
@@ -127,7 +146,16 @@ class ExperimentQueryRunner(QueryRunner):
                     name="plus",
                     args=[
                         ast.Field(chain=["exposure_data", "first_exposure_time"]),
-                        ast.Call(name="toIntervalHour", args=[ast.Constant(value=self.metric.time_window_hours)]),
+                        ast.Call(
+                            name="toIntervalSecond",
+                            args=[
+                                ast.Constant(
+                                    value=conversion_window_to_seconds(
+                                        self.metric.conversion_window, self.metric.conversion_window_unit
+                                    )
+                                ),
+                            ],
+                        ),
                     ],
                 ),
                 op=ast.CompareOperationOp.Lt,
@@ -222,7 +250,8 @@ class ExperimentQueryRunner(QueryRunner):
             if exposure_config.get("properties"):
                 for property in exposure_config.get("properties"):
                     exposure_property_filters.append(property_to_expr(property, self.team))
-            exposure_conditions.append(ast.And(exprs=exposure_property_filters))
+            if exposure_property_filters:
+                exposure_conditions.append(ast.And(exprs=exposure_property_filters))
 
         # For the $feature_flag_called events, we need an additional filter to ensure the event is for the correct feature flag
         if event == "$feature_flag_called":
@@ -370,13 +399,27 @@ class ExperimentQueryRunner(QueryRunner):
                         )
 
             case ExperimentFunnelMetric() as metric:
+                # Pre-calculate step conditions to avoid property resolution issues in UDF
+                # For each step in the funnel, we create a new column that is 1 if the step is true, 0 otherwise
+                step_selects = []
+                for i, funnel_step in enumerate(metric.series):
+                    step_filter = event_or_action_to_filter(self.team, funnel_step)
+                    step_selects.append(
+                        ast.Alias(
+                            alias=f"step_{i}",
+                            expr=ast.Call(name="if", args=[step_filter, ast.Constant(value=1), ast.Constant(value=0)]),
+                        )
+                    )
+
                 return ast.SelectQuery(
                     select=[
                         ast.Field(chain=["events", "timestamp"]),
                         ast.Alias(alias="entity_id", expr=ast.Field(chain=["events", self.entity_key])),
                         ast.Field(chain=["exposure_data", "variant"]),
                         ast.Field(chain=["events", "event"]),
-                        ast.Alias(alias="funnel_step", expr=get_funnel_step_level_expr(self.team, metric)),
+                        ast.Field(chain=["events", "uuid"]),
+                        ast.Field(chain=["events", "properties"]),
+                        *step_selects,
                     ],
                     select_from=ast.JoinExpr(
                         table=ast.Field(chain=["events"]),
@@ -408,10 +451,20 @@ class ExperimentQueryRunner(QueryRunner):
 
     def _get_metric_aggregation_expr(self) -> ast.Expr:
         match self.metric:
-            case ExperimentMeanMetric():
-                return parse_expr("sum(coalesce(toFloat(metric_events.value), 0))")
+            case ExperimentMeanMetric() as metric:
+                match metric.source.math:
+                    case ExperimentMetricMathType.UNIQUE_SESSION:
+                        return parse_expr("toFloat(count(distinct metric_events.value))")
+                    case ExperimentMetricMathType.MIN:
+                        return parse_expr("min(coalesce(toFloat(metric_events.value), 0))")
+                    case ExperimentMetricMathType.MAX:
+                        return parse_expr("max(coalesce(toFloat(metric_events.value), 0))")
+                    case ExperimentMetricMathType.AVG:
+                        return parse_expr("avg(coalesce(toFloat(metric_events.value), 0))")
+                    case _:
+                        return parse_expr("sum(coalesce(toFloat(metric_events.value), 0))")
             case ExperimentFunnelMetric():
-                return funnel_steps_to_window_funnel_expr(self.metric)
+                return funnel_evaluation_expr(self.team, self.metric, events_alias="metric_events")
 
     def _get_metrics_aggregated_per_entity_query(
         self, exposure_query: ast.SelectQuery, metric_events_query: ast.SelectQuery
@@ -463,6 +516,58 @@ class ExperimentQueryRunner(QueryRunner):
             ],
         )
 
+    def _get_winsorized_metric_values_query(self, metric_events_query: ast.SelectQuery) -> ast.SelectQuery:
+        """
+        Returns the query to winsorize metric values
+        One row per entity where the value is winsorized to the lower and upper bounds
+        Columns: variant, entity_id, value (winsorized metric values)
+        """
+
+        if not isinstance(self.metric, ExperimentMeanMetric):
+            return metric_events_query
+
+        if self.metric.lower_bound_percentile is not None:
+            lower_bound_expr = parse_expr(
+                "quantile({level})(value)",
+                placeholders={"level": ast.Constant(value=self.metric.lower_bound_percentile)},
+            )
+        else:
+            lower_bound_expr = parse_expr("min(value)")
+
+        if self.metric.upper_bound_percentile is not None:
+            upper_bound_expr = parse_expr(
+                "quantile({level})(value)",
+                placeholders={"level": ast.Constant(value=self.metric.upper_bound_percentile)},
+            )
+        else:
+            upper_bound_expr = parse_expr("max(value)")
+
+        percentiles = ast.SelectQuery(
+            select=[
+                ast.Alias(alias="lower_bound", expr=lower_bound_expr),
+                ast.Alias(alias="upper_bound", expr=upper_bound_expr),
+            ],
+            select_from=ast.JoinExpr(table=metric_events_query, alias="metric_events"),
+        )
+
+        return ast.SelectQuery(
+            select=[
+                ast.Field(chain=["metric_events", "variant"]),
+                ast.Field(chain=["metric_events", "entity_id"]),
+                ast.Alias(
+                    expr=parse_expr(
+                        "least(greatest(percentiles.lower_bound, metric_events.value), percentiles.upper_bound)"
+                    ),
+                    alias="value",
+                ),
+            ],
+            select_from=ast.JoinExpr(
+                table=metric_events_query,
+                alias="metric_events",
+                next_join=ast.JoinExpr(table=percentiles, alias="percentiles", join_type="CROSS JOIN"),
+            ),
+        )
+
     def _get_experiment_variant_results_query(
         self, metrics_aggregated_per_entity_query: ast.SelectQuery
     ) -> ast.SelectQuery:
@@ -494,6 +599,14 @@ class ExperimentQueryRunner(QueryRunner):
             exposure_query, metric_events_query
         )
 
+        # Get the winsorized metric values if configured
+        if isinstance(self.metric, ExperimentMeanMetric) and (
+            self.metric.lower_bound_percentile or self.metric.upper_bound_percentile
+        ):
+            metrics_aggregated_per_entity_query = self._get_winsorized_metric_values_query(
+                metrics_aggregated_per_entity_query
+            )
+
         # Get the final results for each variant
         experiment_variant_results_query = self._get_experiment_variant_results_query(
             metrics_aggregated_per_entity_query
@@ -503,12 +616,23 @@ class ExperimentQueryRunner(QueryRunner):
 
     def _evaluate_experiment_query(
         self,
-    ) -> list[ExperimentVariantTrendsBaseStats] | list[ExperimentVariantFunnelsBaseStats]:
+    ) -> list[tuple[str, int, int, int]]:
+        # Adding experiment specific tags to the tag collection
+        # This will be available as labels in Prometheus
+        tag_queries(
+            experiment_id=str(self.experiment.id),
+            experiment_name=self.experiment.name,
+            experiment_feature_flag_key=self.feature_flag.key,
+            experiment_is_data_warehouse_query=self.is_data_warehouse_query,
+        )
+
         response = execute_hogql_query(
+            query_type="ExperimentQuery",
             query=self._get_experiment_query(),
             team=self.team,
             timings=self.timings,
             modifiers=create_default_modifiers_for_team(self.team),
+            settings=HogQLGlobalSettings(max_execution_time=180),
         )
 
         # NOTE: For now, remove the $multiple variant
@@ -516,99 +640,115 @@ class ExperimentQueryRunner(QueryRunner):
 
         sorted_results = sorted(response.results, key=lambda x: self.variants.index(x[0]))
 
-        if isinstance(self.metric, ExperimentFunnelMetric):
-            return [
-                ExperimentVariantFunnelsBaseStats(
-                    failure_count=result[1] - result[2],
-                    key=result[0],
-                    success_count=result[2],
-                )
-                for result in sorted_results
-            ]
-
-        return [
-            ExperimentVariantTrendsBaseStats(
-                absolute_exposure=result[1],
-                count=result[2],
-                exposure=result[1],
-                key=result[0],
-            )
-            for result in sorted_results
-        ]
+        return sorted_results
 
     def calculate(self) -> ExperimentQueryResponse:
-        variants = self._evaluate_experiment_query()
+        sorted_results = self._evaluate_experiment_query()
 
-        self._validate_event_variants(variants)
+        if self.stats_method == "frequentist":
+            frequentist_variants = get_new_variant_results(sorted_results)
 
-        control_variants = [variant for variant in variants if variant.key == CONTROL_VARIANT_KEY]
-        control_variant = control_variants[0]
-        test_variants = [variant for variant in variants if variant.key != CONTROL_VARIANT_KEY]
+            self._validate_event_variants(frequentist_variants)
 
-        match self.metric:
-            case ExperimentMeanMetric():
-                match self.metric.source.math:
-                    case ExperimentMetricMathType.SUM:
-                        probabilities = calculate_probabilities_v2_continuous(
-                            control_variant=cast(ExperimentVariantTrendsBaseStats, control_variant),
-                            test_variants=cast(list[ExperimentVariantTrendsBaseStats], test_variants),
-                        )
-                        significance_code, p_value = are_results_significant_v2_continuous(
-                            control_variant=cast(ExperimentVariantTrendsBaseStats, control_variant),
-                            test_variants=cast(list[ExperimentVariantTrendsBaseStats], test_variants),
-                            probabilities=probabilities,
-                        )
-                        credible_intervals = calculate_credible_intervals_v2_continuous(
-                            [control_variant, *test_variants]
-                        )
-                    # Otherwise, we default to count
-                    case _:
-                        probabilities = calculate_probabilities_v2_count(
-                            cast(ExperimentVariantTrendsBaseStats, control_variant),
-                            cast(list[ExperimentVariantTrendsBaseStats], test_variants),
-                        )
-                        significance_code, p_value = are_results_significant_v2_count(
-                            cast(ExperimentVariantTrendsBaseStats, control_variant),
-                            cast(list[ExperimentVariantTrendsBaseStats], test_variants),
+            control_variant, test_variants = split_baseline_and_test_variants(frequentist_variants)
+
+            return get_frequentist_experiment_result_new_format(
+                metric=self.metric,
+                control_variant=control_variant,
+                test_variants=test_variants,
+            )
+
+        else:
+            variants: list[ExperimentVariantTrendsBaseStats] | list[ExperimentVariantFunnelsBaseStats]
+            match self.metric:
+                case ExperimentMeanMetric():
+                    trends_variants = get_legacy_trends_variant_results(sorted_results)
+                    self._validate_event_variants(trends_variants)
+                    trends_control_variant, trends_test_variants = split_baseline_and_test_variants(trends_variants)
+                    match is_continuous(self.metric.source.math):
+                        case True:
+                            probabilities = calculate_probabilities_v2_continuous(
+                                control_variant=trends_control_variant,
+                                test_variants=trends_test_variants,
+                            )
+                            significance_code, p_value = are_results_significant_v2_continuous(
+                                control_variant=trends_control_variant,
+                                test_variants=trends_test_variants,
+                                probabilities=probabilities,
+                            )
+                            credible_intervals = calculate_credible_intervals_v2_continuous(
+                                [trends_control_variant, *trends_test_variants]
+                            )
+                        # Otherwise, we default to count
+                        case False:
+                            probabilities = calculate_probabilities_v2_count(
+                                control_variant=trends_control_variant,
+                                test_variants=trends_test_variants,
+                            )
+                            significance_code, p_value = are_results_significant_v2_count(
+                                control_variant=trends_control_variant,
+                                test_variants=trends_test_variants,
+                                probabilities=probabilities,
+                            )
+                            credible_intervals = calculate_credible_intervals_v2_count(
+                                [trends_control_variant, *trends_test_variants]
+                            )
+
+                    probability = {
+                        variant.key: probability
+                        for variant, probability in zip(
+                            [trends_control_variant, *trends_test_variants],
                             probabilities,
                         )
-                        credible_intervals = calculate_credible_intervals_v2_count([control_variant, *test_variants])
+                    }
+                    variants = trends_variants
 
-            case ExperimentFunnelMetric():
-                probabilities = calculate_probabilities_v2_funnel(
-                    cast(ExperimentVariantFunnelsBaseStats, control_variant),
-                    cast(list[ExperimentVariantFunnelsBaseStats], test_variants),
-                )
-                significance_code, p_value = are_results_significant_v2_funnel(
-                    cast(ExperimentVariantFunnelsBaseStats, control_variant),
-                    cast(list[ExperimentVariantFunnelsBaseStats], test_variants),
-                    probabilities,
-                )
-                credible_intervals = calculate_credible_intervals_v2_funnel(
-                    cast(list[ExperimentVariantFunnelsBaseStats], [control_variant, *test_variants])
-                )
+                case ExperimentFunnelMetric():
+                    funnel_variants = get_legacy_funnels_variant_results(sorted_results)
+                    self._validate_event_variants(funnel_variants)
+                    funnel_control_variant, funnel_test_variants = split_baseline_and_test_variants(funnel_variants)
+                    probabilities = calculate_probabilities_v2_funnel(
+                        control=funnel_control_variant,
+                        variants=funnel_test_variants,
+                    )
+                    significance_code, p_value = are_results_significant_v2_funnel(
+                        control=funnel_control_variant,
+                        variants=funnel_test_variants,
+                        probabilities=probabilities,
+                    )
+                    credible_intervals = calculate_credible_intervals_v2_funnel(
+                        [funnel_control_variant, *funnel_test_variants]
+                    )
+                    probability = {
+                        variant.key: probability
+                        for variant, probability in zip(
+                            [funnel_control_variant, *funnel_test_variants],
+                            probabilities,
+                        )
+                    }
+                    variants = funnel_variants
 
-            case _:
-                raise ValueError(f"Unsupported metric type: {self.metric.metric_type}")
+                case _:
+                    raise ValueError(f"Unsupported metric type: {self.metric.metric_type}")
 
         return ExperimentQueryResponse(
             kind="ExperimentQuery",
             insight=[],
             metric=self.metric,
             variants=variants,
-            probability={
-                variant.key: probability
-                for variant, probability in zip([control_variant, *test_variants], probabilities)
-            },
+            probability=probability,
             significant=significance_code == ExperimentSignificanceCode.SIGNIFICANT,
             significance_code=significance_code,
-            stats_version=self.stats_version,
+            stats_version=2,
             p_value=p_value,
             credible_intervals=credible_intervals,
         )
 
     def _validate_event_variants(
-        self, variants: list[ExperimentVariantTrendsBaseStats] | list[ExperimentVariantFunnelsBaseStats]
+        self,
+        variants: list[ExperimentVariantTrendsBaseStats]
+        | list[ExperimentVariantFunnelsBaseStats]
+        | list[ExperimentStatsBase],
     ):
         errors = {
             ExperimentNoResultsErrorKeys.NO_EXPOSURES: True,
@@ -643,6 +783,7 @@ class ExperimentQueryRunner(QueryRunner):
     def get_cache_payload(self) -> dict:
         payload = super().get_cache_payload()
         payload["experiment_response_version"] = 2
+        payload["stats_method"] = self.stats_method
         return payload
 
     def _is_stale(self, last_refresh: Optional[datetime], lazy: bool = False) -> bool:

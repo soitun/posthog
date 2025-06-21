@@ -6,19 +6,20 @@ import { actionToUrl, router, urlToAction } from 'kea-router'
 import { windowValues } from 'kea-window-values'
 import api from 'lib/api'
 import { authorizedUrlListLogic, AuthorizedUrlListType } from 'lib/components/AuthorizedUrlList/authorizedUrlListLogic'
-import { TaxonomicFilterGroupType } from 'lib/components/TaxonomicFilter/types'
 import { FEATURE_FLAGS, RETENTION_FIRST_TIME } from 'lib/constants'
 import { LemonButton } from 'lib/lemon-ui/LemonButton'
 import { Link, PostHogComDocsURL } from 'lib/lemon-ui/Link/Link'
 import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { getDefaultInterval, isNotNil, objectsEqual, UnexpectedNeverError, updateDatesWithInterval } from 'lib/utils'
 import { isDefinitionStale } from 'lib/utils/definitions'
-import { errorTrackingQuery } from 'scenes/error-tracking/queries'
+import { errorTrackingQuery } from 'products/error_tracking/frontend/queries'
+import { dataWarehouseSettingsLogic } from 'scenes/data-warehouse/settings/dataWarehouseSettingsLogic'
 import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
 import { Scene } from 'scenes/sceneTypes'
 import { teamLogic } from 'scenes/teamLogic'
 import { urls } from 'scenes/urls'
 import { userLogic } from 'scenes/userLogic'
+import { marketingAnalyticsSettingsLogic } from 'scenes/web-analytics/tabs/marketing-analytics/frontend/logic/marketingAnalyticsSettingsLogic'
 
 import { WEB_VITALS_COLORS, WEB_VITALS_THRESHOLDS } from '~/queries/nodes/WebVitals/definitions'
 import { hogqlQuery } from '~/queries/query'
@@ -29,7 +30,7 @@ import {
     BreakdownFilter,
     CompareFilter,
     CustomEventConversionGoal,
-    DataWarehouseNode,
+    DataTableNode,
     EventsNode,
     InsightVizNode,
     NodeKind,
@@ -47,6 +48,7 @@ import {
     WebVitalsMetric,
 } from '~/queries/schema/schema-general'
 import { isWebAnalyticsPropertyFilters } from '~/queries/schema-guards'
+import { hogql } from '~/queries/utils'
 import {
     AvailableFeature,
     BaseMathType,
@@ -57,16 +59,20 @@ import {
     InsightLogicProps,
     InsightType,
     IntervalType,
+    PropertyFilterBaseValue,
     PropertyFilterType,
     PropertyMathType,
     PropertyOperator,
     RecordingUniversalFilters,
     RetentionPeriod,
+    TeamPublicType,
+    TeamType,
     UniversalFiltersGroupValue,
 } from '~/types'
 
+import { getDashboardItemId, getNewInsightUrlFactory } from './insightsUtils'
+import { marketingAnalyticsLogic } from './tabs/marketing-analytics/frontend/logic/marketingAnalyticsLogic'
 import type { webAnalyticsLogicType } from './webAnalyticsLogicType'
-
 export interface WebTileLayout {
     /** The class has to be spelled out without interpolation, as otherwise Tailwind can't pick it up. */
     colSpanClassName?: `md:col-span-${number}` | 'md:col-span-full'
@@ -84,12 +90,14 @@ export enum TileId {
     SOURCES = 'SOURCES',
     DEVICES = 'DEVICES',
     GEOGRAPHY = 'GEOGRAPHY',
+    ACTIVE_HOURS = 'ACTIVE_HOURS',
     RETENTION = 'RETENTION',
     REPLAY = 'REPLAY',
     ERROR_TRACKING = 'ERROR_TRACKING',
     GOALS = 'GOALS',
     WEB_VITALS = 'WEB_VITALS',
     WEB_VITALS_PATH_BREAKDOWN = 'WEB_VITALS_PATH_BREAKDOWN',
+    FRUSTRATING_PAGES = 'FRUSTRATING_PAGES',
 
     // Page Report Tiles to avoid conflicts with web analytics
     PAGE_REPORTS_COMBINED_METRICS_CHART_SECTION = 'PR_COMBINED_METRICS_CHART_SECTION',
@@ -97,6 +105,7 @@ export enum TileId {
     PAGE_REPORTS_DEVICE_INFORMATION_SECTION = 'PR_DEVICE_INFORMATION_SECTION',
     PAGE_REPORTS_TRAFFIC_SECTION = 'PR_TRAFFIC_SECTION',
     PAGE_REPORTS_GEOGRAPHY_SECTION = 'PR_GEOGRAPHY_SECTION',
+    PAGE_REPORTS_TOP_EVENTS_SECTION = 'PR_TOP_EVENTS_SECTION',
     PAGE_REPORTS_COMBINED_METRICS_CHART = 'PR_COMBINED_METRICS_CHART',
     PAGE_REPORTS_ENTRY_PATHS = 'PR_ENTRY_PATHS',
     PAGE_REPORTS_EXIT_PATHS = 'PR_EXIT_PATHS',
@@ -111,6 +120,9 @@ export enum TileId {
     PAGE_REPORTS_CITIES = 'PR_CITIES',
     PAGE_REPORTS_TIMEZONES = 'PR_TIMEZONES',
     PAGE_REPORTS_LANGUAGES = 'PR_LANGUAGES',
+    PAGE_REPORTS_TOP_EVENTS = 'PR_TOP_EVENTS',
+    MARKETING = 'MARKETING',
+    MARKETING_CAMPAIGN_BREAKDOWN = 'MARKETING_CAMPAIGN_BREAKDOWN',
 }
 
 export enum ProductTab {
@@ -118,6 +130,7 @@ export enum ProductTab {
     WEB_VITALS = 'web-vitals',
     PAGE_REPORTS = 'page-reports',
     SESSION_ATTRIBUTION_EXPLORER = 'session-attribution-explorer',
+    MARKETING = 'marketing',
 }
 
 export type DeviceType = 'Desktop' | 'Mobile'
@@ -131,12 +144,14 @@ const loadPriorityMap: Record<TileId, number> = {
     [TileId.SOURCES]: 4,
     [TileId.DEVICES]: 5,
     [TileId.GEOGRAPHY]: 6,
-    [TileId.RETENTION]: 7,
-    [TileId.REPLAY]: 8,
-    [TileId.ERROR_TRACKING]: 9,
-    [TileId.GOALS]: 10,
-    [TileId.WEB_VITALS]: 11,
-    [TileId.WEB_VITALS_PATH_BREAKDOWN]: 12,
+    [TileId.ACTIVE_HOURS]: 7,
+    [TileId.RETENTION]: 8,
+    [TileId.REPLAY]: 9,
+    [TileId.ERROR_TRACKING]: 10,
+    [TileId.GOALS]: 11,
+    [TileId.WEB_VITALS]: 12,
+    [TileId.WEB_VITALS_PATH_BREAKDOWN]: 13,
+    [TileId.FRUSTRATING_PAGES]: 14,
 
     // Page Report Sections
     [TileId.PAGE_REPORTS_COMBINED_METRICS_CHART_SECTION]: 1,
@@ -144,6 +159,7 @@ const loadPriorityMap: Record<TileId, number> = {
     [TileId.PAGE_REPORTS_DEVICE_INFORMATION_SECTION]: 3,
     [TileId.PAGE_REPORTS_TRAFFIC_SECTION]: 4,
     [TileId.PAGE_REPORTS_GEOGRAPHY_SECTION]: 5,
+    [TileId.PAGE_REPORTS_TOP_EVENTS_SECTION]: 6,
 
     // Page Report Tiles
     [TileId.PAGE_REPORTS_COMBINED_METRICS_CHART]: 1,
@@ -160,7 +176,28 @@ const loadPriorityMap: Record<TileId, number> = {
     [TileId.PAGE_REPORTS_CITIES]: 12,
     [TileId.PAGE_REPORTS_TIMEZONES]: 13,
     [TileId.PAGE_REPORTS_LANGUAGES]: 14,
+    [TileId.PAGE_REPORTS_TOP_EVENTS]: 15,
+    [TileId.MARKETING]: 16,
+
+    // Marketing Tiles
+    [TileId.MARKETING_CAMPAIGN_BREAKDOWN]: 1,
 }
+
+// To enable a tile here, you must update the QueryRunner to support it
+// or make sure it can load in a decent time (which event-only tiles usually do).
+// We filter them here to enable a faster experience for the user as the
+// tiles that don't support pre-aggregated tables take a longer time to load
+// and will effectively block other queries to load because of the concurrencyController
+export const TILES_ALLOWED_ON_PRE_AGGREGATED = [
+    TileId.OVERVIEW,
+    TileId.PATHS,
+    TileId.SOURCES,
+    TileId.DEVICES,
+
+    // Not 100% supported yet but they are fast enough that we can show them
+    TileId.GRAPHS,
+    TileId.GEOGRAPHY,
+]
 
 export interface BaseTile {
     tileId: TileId
@@ -216,22 +253,11 @@ export interface ErrorTrackingTile extends BaseTile {
 
 export interface SectionTile extends BaseTile {
     kind: 'section'
-    title: string
+    title?: string
     tiles: WebAnalyticsTile[]
 }
 
 export type WebAnalyticsTile = QueryTile | TabsTile | ReplayTile | ErrorTrackingTile | SectionTile
-
-export interface WebAnalyticsModalQuery {
-    tileId: TileId
-    tabId?: string
-    title?: string | JSX.Element
-    query: QuerySchema
-    insightProps: InsightLogicProps
-    showIntervalSelect?: boolean
-    control?: JSX.Element
-    canOpenInsight?: boolean
-}
 
 export enum GraphsTab {
     UNIQUE_USERS = 'UNIQUE_USERS',
@@ -276,7 +302,13 @@ export enum GeographyTab {
     REGIONS = 'REGIONS',
     CITIES = 'CITIES',
     TIMEZONES = 'TIMEZONES',
+    HEATMAP = 'HEATMAP',
     LANGUAGES = 'LANGUAGES',
+}
+
+export enum ActiveHoursTab {
+    UNIQUE = 'UNIQUE',
+    TOTAL_EVENTS = 'TOTAL_EVENTS',
 }
 
 export enum ConversionGoalWarning {
@@ -340,7 +372,9 @@ export const webStatsBreakdownToPropertyName = (
         case WebStatsBreakdown.Timezone:
             return { key: '$timezone', type: PropertyFilterType.Event }
         case WebStatsBreakdown.Language:
-            return { key: '$geoip_language', type: PropertyFilterType.Event }
+            return { key: '$browser_language', type: PropertyFilterType.Event }
+        case WebStatsBreakdown.FrustrationMetrics:
+            return { key: '$pathname', type: PropertyFilterType.Event }
         case WebStatsBreakdown.InitialUTMSourceMediumCampaign:
             return undefined
         default:
@@ -370,11 +404,6 @@ const INITIAL_DATE_FROM = '-7d' as string | null
 const INITIAL_DATE_TO = null as string | null
 const INITIAL_INTERVAL = getDefaultInterval(INITIAL_DATE_FROM, INITIAL_DATE_TO)
 
-const getDashboardItemId = (section: TileId, tab: string | undefined, isModal?: boolean): `new-${string}` => {
-    // pretend to be a new-AdHoc to get the correct behaviour elsewhere
-    return `new-AdHoc.web-analytics.${section}.${tab || 'default'}.${isModal ? 'modal' : 'default'}`
-}
-
 const teamId = window.POSTHOG_APP_CONTEXT?.current_team?.id
 const persistConfig = { persist: true, prefix: `${teamId}__` }
 export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
@@ -384,13 +413,19 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
             featureFlagLogic,
             ['featureFlags'],
             teamLogic,
-            ['currentTeam'],
+            ['currentTeam', 'baseCurrency'],
             userLogic,
             ['hasAvailableFeature'],
             preflightLogic,
             ['isDev'],
             authorizedUrlListLogic({ type: AuthorizedUrlListType.WEB_ANALYTICS, actionId: null, experimentId: null }),
             ['authorizedUrls'],
+            marketingAnalyticsSettingsLogic,
+            ['sources_map', 'conversion_goals'],
+            dataWarehouseSettingsLogic,
+            ['dataWarehouseTables', 'selfManagedTables'],
+            marketingAnalyticsLogic,
+            ['loading', 'createMarketingDataWarehouseNodes', 'createDynamicCampaignQuery'],
         ],
     })),
     actions({
@@ -405,6 +440,7 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                 deviceTab?: string
                 pathTab?: string
                 geographyTab?: string
+                activeHoursTab?: string
             }
         ) => ({ type, key, value, tabChange }),
         setGraphsTab: (tab: string) => ({ tab }),
@@ -412,6 +448,7 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
         setDeviceTab: (tab: string) => ({ tab }),
         setPathTab: (tab: string) => ({ tab }),
         setGeographyTab: (tab: string) => ({ tab }),
+        setActiveHoursTab: (tab: string) => ({ tab }),
         setDomainFilter: (domain: string | null) => ({ domain }),
         setDeviceTypeFilter: (deviceType: DeviceType | null) => ({ deviceType }),
         clearTablesOrderBy: () => true,
@@ -430,8 +467,6 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
         setShouldFilterTestAccounts: (shouldFilterTestAccounts: boolean) => ({ shouldFilterTestAccounts }),
         setShouldStripQueryParams: (shouldStripQueryParams: boolean) => ({ shouldStripQueryParams }),
         setConversionGoal: (conversionGoal: WebAnalyticsConversionGoal | null) => ({ conversionGoal }),
-        openModal: (tileId: TileId, tabId?: string) => ({ tileId, tabId }),
-        closeModal: () => true,
         openAsNewInsight: (tileId: TileId, tabId?: string) => ({ tileId, tabId }),
         setConversionGoalWarning: (warning: ConversionGoalWarning | null) => ({ warning }),
         setCompareFilter: (compareFilter: CompareFilter) => ({ compareFilter }),
@@ -474,7 +509,7 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                     if (similarFilterExists) {
                         // if there's already a matching property, turn it off or merge them
                         return oldPropertyFilters
-                            .map((f) => {
+                            .map((f: WebAnalyticsPropertyFilter) => {
                                 if (
                                     f.key !== key ||
                                     f.type !== type ||
@@ -483,7 +518,7 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                                     return f
                                 }
                                 const oldValue = (Array.isArray(f.value) ? f.value : [f.value]).filter(isNotNil)
-                                let newValue: (string | number | bigint)[]
+                                let newValue: PropertyFilterBaseValue[]
                                 if (oldValue.includes(value)) {
                                     // If there are multiple values for this filter, reduce that to just the one being clicked
                                     if (oldValue.length > 1) {
@@ -597,21 +632,18 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                 togglePropertyFilter: (oldTab, { tabChange }) => tabChange?.geographyTab || oldTab,
             },
         ],
+        _activeHoursTab: [
+            null as string | null,
+            persistConfig,
+            {
+                setActiveHoursTab: (_, { tab }) => tab,
+            },
+        ],
         _isPathCleaningEnabled: [
             true as boolean,
             persistConfig,
             {
                 setIsPathCleaningEnabled: (_, { isPathCleaningEnabled }) => isPathCleaningEnabled,
-            },
-        ],
-        _modalTileAndTab: [
-            null as { tileId: TileId; tabId?: string } | null,
-            {
-                openModal: (_, { tileId, tabId }) => ({
-                    tileId,
-                    tabId,
-                }),
-                closeModal: () => null,
             },
         ],
         tablesOrderBy: [
@@ -723,6 +755,15 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
         ],
     }),
     selectors(({ actions, values }) => ({
+        preAggregatedEnabled: [
+            (s) => [s.featureFlags, s.currentTeam],
+            (featureFlags: Record<string, boolean>, currentTeam: TeamPublicType | TeamType | null) => {
+                return (
+                    featureFlags[FEATURE_FLAGS.SETTINGS_WEB_ANALYTICS_PRE_AGGREGATED_TABLES] &&
+                    currentTeam?.modifiers?.useWebAnalyticsPreAggregatedTables
+                )
+            },
+        ],
         breadcrumbs: [
             (s) => [s.productTab],
             (productTab: ProductTab): Breadcrumb[] => {
@@ -750,6 +791,14 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                     })
                 }
 
+                if (productTab === ProductTab.MARKETING) {
+                    breadcrumbs.push({
+                        key: Scene.WebAnalyticsMarketing,
+                        name: `Marketing`,
+                        path: urls.webAnalyticsMarketing(),
+                    })
+                }
+
                 return breadcrumbs
             },
         ],
@@ -758,6 +807,10 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
         deviceTab: [(s) => [s._deviceTab], (deviceTab: string | null) => deviceTab || DeviceTab.DEVICE_TYPE],
         pathTab: [(s) => [s._pathTab], (pathTab: string | null) => pathTab || PathTab.PATH],
         geographyTab: [(s) => [s._geographyTab], (geographyTab: string | null) => geographyTab || GeographyTab.MAP],
+        activeHoursTab: [
+            (s) => [s._activeHoursTab],
+            (activeHoursTab: string | null) => activeHoursTab || ActiveHoursTab.UNIQUE,
+        ],
         isPathCleaningEnabled: [
             (s) => [s._isPathCleaningEnabled, s.hasAvailableFeature],
             (isPathCleaningEnabled: boolean, hasAvailableFeature) => {
@@ -833,15 +886,17 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                 s.deviceTab,
                 s.pathTab,
                 s.geographyTab,
-                () => values.shouldShowGeographyTile,
+                s.activeHoursTab,
+                () => values.shouldShowGeoIPQueries,
             ],
-            (graphsTab, sourceTab, deviceTab, pathTab, geographyTab, shouldShowGeographyTile) => ({
+            (graphsTab, sourceTab, deviceTab, pathTab, geographyTab, activeHoursTab, shouldShowGeoIPQueries) => ({
                 graphsTab,
                 sourceTab,
                 deviceTab,
                 pathTab,
                 geographyTab,
-                shouldShowGeographyTile,
+                activeHoursTab,
+                shouldShowGeoIPQueries,
             }),
         ],
         controls: [
@@ -893,10 +948,13 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                 () => values.isGreaterThanMd,
                 () => values.currentTeam,
                 () => values.tileVisualizations,
+                () => values.preAggregatedEnabled,
+                () => values.campaignCostsBreakdown,
+                s.createMarketingDataWarehouseNodes,
             ],
             (
                 productTab,
-                { graphsTab, sourceTab, deviceTab, pathTab, geographyTab, shouldShowGeographyTile },
+                { graphsTab, sourceTab, deviceTab, pathTab, geographyTab, shouldShowGeoIPQueries, activeHoursTab },
                 { isPathCleaningEnabled, filterTestAccounts, shouldStripQueryParams },
                 {
                     webAnalyticsFilters,
@@ -911,7 +969,10 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                 featureFlags,
                 isGreaterThanMd,
                 currentTeam,
-                tileVisualizations
+                tileVisualizations,
+                preAggregatedEnabled,
+                campaignCostsBreakdown,
+                createMarketingDataWarehouseNodes
             ): WebAnalyticsTile[] => {
                 const dateRange = { date_from: dateFrom, date_to: dateTo }
                 const sampling = { enabled: false, forceSamplingRate: { numerator: 1, denominator: 10 } }
@@ -963,14 +1024,12 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                     : undefined
 
                 // the queries don't currently include revenue when the conversion goal is an action
-                const includeRevenue =
-                    !!featureFlags[FEATURE_FLAGS.WEB_REVENUE_TRACKING] &&
-                    !(conversionGoal && 'actionId' in conversionGoal)
+                const includeRevenue = !(conversionGoal && 'actionId' in conversionGoal)
 
-                const revenueEventsSeries: (EventsNode | DataWarehouseNode)[] =
-                    includeRevenue && currentTeam?.revenue_tracking_config
+                const revenueEventsSeries: EventsNode[] =
+                    includeRevenue && currentTeam?.revenue_analytics_config
                         ? ([
-                              ...currentTeam.revenue_tracking_config.events.map((e) => ({
+                              ...currentTeam.revenue_analytics_config.events.map((e) => ({
                                   name: e.eventName,
                                   event: e.eventName,
                                   custom_name: e.eventName,
@@ -979,22 +1038,7 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                                   math_property: e.revenueProperty,
                                   math_property_revenue_currency: e.revenueCurrencyProperty,
                               })),
-                              ...(featureFlags[FEATURE_FLAGS.WEB_ANALYTICS_DATA_WAREHOUSE_REVENUE_SETTINGS]
-                                  ? currentTeam.revenue_tracking_config.dataWarehouseTables.map((t) => ({
-                                        id: t.tableName,
-                                        name: t.tableName,
-                                        table_name: t.tableName,
-                                        kind: NodeKind.DataWarehouseNode,
-                                        math: PropertyMathType.Sum,
-                                        id_field: t.distinctIdColumn,
-                                        distinct_id_field: t.distinctIdColumn,
-                                        math_property: t.revenueColumn,
-                                        math_property_type: TaxonomicFilterGroupType.DataWarehouseProperties,
-                                        math_property_revenue_currency: t.revenueCurrencyColumn,
-                                        timestamp_field: t.timestampColumn,
-                                    }))
-                                  : []),
-                          ] as (EventsNode | DataWarehouseNode)[])
+                          ] as EventsNode[])
                         : []
 
                 const conversionRevenueSeries =
@@ -1078,7 +1122,7 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
 
                     // In case of a graph, we need to use the breakdownFilter and a InsightsVizNode,
                     // which will actually be handled by a WebStatsTrendTile instead of a WebStatsTableTile
-                    if (featureFlags[FEATURE_FLAGS.WEB_ANALYTICS_TREND_VIZ_TOGGLE] && visualization === 'graph') {
+                    if (visualization === 'graph') {
                         return {
                             ...baseTabProps,
                             query: {
@@ -1204,6 +1248,80 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                             },
                         },
                     ]
+                }
+
+                if (productTab === ProductTab.MARKETING) {
+                    return [
+                        {
+                            kind: 'query',
+                            tileId: TileId.MARKETING,
+                            layout: {
+                                colSpanClassName: 'md:col-span-2',
+                                orderWhenLargeClassName: 'xxl:order-1',
+                            },
+                            title: 'Marketing Costs',
+                            query: {
+                                kind: NodeKind.InsightVizNode,
+                                embedded: true,
+                                hidePersonsModal: true,
+                                hideTooltipOnScroll: true,
+                                source: {
+                                    kind: NodeKind.TrendsQuery,
+                                    series:
+                                        createMarketingDataWarehouseNodes.length > 0
+                                            ? createMarketingDataWarehouseNodes
+                                            : [
+                                                  // Fallback when no sources are configured
+                                                  {
+                                                      kind: NodeKind.EventsNode,
+                                                      event: 'no_sources_configured',
+                                                      custom_name: 'No marketing sources configured',
+                                                      math: BaseMathType.TotalCount,
+                                                  },
+                                              ],
+                                    interval: 'week',
+                                    dateRange: dateRange,
+                                    trendsFilter: {
+                                        display: ChartDisplayType.ActionsAreaGraph,
+                                        aggregationAxisFormat: 'numeric',
+                                        aggregationAxisPrefix: '$',
+                                    },
+                                },
+                            },
+                            insightProps: createInsightProps(TileId.MARKETING),
+                            canOpenInsight: true,
+                            canOpenModal: false,
+                            docs: {
+                                title: 'Marketing Costs',
+                                description:
+                                    createMarketingDataWarehouseNodes.length > 0
+                                        ? 'Track costs from your configured marketing data sources.'
+                                        : 'Configure marketing data sources in the settings to track costs from your ad platforms.',
+                            },
+                        },
+                        campaignCostsBreakdown
+                            ? {
+                                  kind: 'query',
+                                  tileId: TileId.MARKETING_CAMPAIGN_BREAKDOWN,
+                                  layout: {
+                                      colSpanClassName: 'md:col-span-2',
+                                      orderWhenLargeClassName: 'xxl:order-2',
+                                  },
+                                  title: 'Campaign Costs Breakdown',
+                                  query: campaignCostsBreakdown,
+                                  insightProps: createInsightProps(TileId.MARKETING_CAMPAIGN_BREAKDOWN),
+                                  canOpenModal: true,
+                                  canOpenInsight: false,
+                                  docs: {
+                                      title: 'Campaign Costs Breakdown',
+                                      description:
+                                          'Breakdown of marketing costs by individual campaign names across all ad platforms.',
+                                  },
+                              }
+                            : null,
+                    ]
+                        .filter(isNotNil)
+                        .map((tile) => tile as WebAnalyticsTile)
                 }
 
                 const allTiles: (WebAnalyticsTile | null)[] = [
@@ -1705,89 +1823,99 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                             ),
                         ],
                     },
-                    shouldShowGeographyTile
-                        ? {
-                              kind: 'tabs',
-                              tileId: TileId.GEOGRAPHY,
-                              layout: {
-                                  colSpanClassName: 'md:col-span-full',
-                              },
-                              activeTabId: geographyTab || GeographyTab.MAP,
-                              setTabId: actions.setGeographyTab,
-                              tabs: [
-                                  {
-                                      id: GeographyTab.MAP,
-                                      title: 'World map',
-                                      linkText: 'Map',
-                                      query: {
-                                          kind: NodeKind.InsightVizNode,
-                                          source: {
-                                              kind: NodeKind.TrendsQuery,
-                                              breakdownFilter: {
-                                                  // use the event level country code rather than person, to work better with personless users
-                                                  breakdown: '$geoip_country_code',
-                                                  breakdown_type: 'event',
-                                              },
-                                              dateRange,
-                                              series: [
-                                                  {
-                                                      event: '$pageview',
-                                                      name: 'Pageview',
-                                                      kind: NodeKind.EventsNode,
-                                                      math: BaseMathType.UniqueUsers,
+
+                    {
+                        kind: 'tabs',
+                        tileId: TileId.GEOGRAPHY,
+                        layout: {
+                            colSpanClassName: 'md:col-span-full',
+                        },
+                        activeTabId:
+                            geographyTab || (shouldShowGeoIPQueries ? GeographyTab.MAP : GeographyTab.LANGUAGES),
+                        setTabId: actions.setGeographyTab,
+                        tabs: (
+                            [
+                                shouldShowGeoIPQueries
+                                    ? {
+                                          id: GeographyTab.MAP,
+                                          title: 'World map',
+                                          linkText: 'Map',
+                                          query: {
+                                              kind: NodeKind.InsightVizNode,
+                                              source: {
+                                                  kind: NodeKind.TrendsQuery,
+                                                  breakdownFilter: {
+                                                      // use the event level country code rather than person, to work better with personless users
+                                                      breakdown: '$geoip_country_code',
+                                                      breakdown_type: 'event',
                                                   },
-                                              ],
-                                              trendsFilter: {
-                                                  display: ChartDisplayType.WorldMap,
+                                                  dateRange,
+                                                  series: [
+                                                      {
+                                                          event: '$pageview',
+                                                          name: 'Pageview',
+                                                          kind: NodeKind.EventsNode,
+                                                          math: BaseMathType.UniqueUsers,
+                                                      },
+                                                  ],
+                                                  trendsFilter: {
+                                                      display: ChartDisplayType.WorldMap,
+                                                  },
+                                                  conversionGoal,
+                                                  filterTestAccounts,
+                                                  properties: webAnalyticsFilters,
                                               },
-                                              conversionGoal,
-                                              filterTestAccounts,
-                                              properties: webAnalyticsFilters,
+                                              hidePersonsModal: true,
+                                              embedded: true,
                                           },
-                                          hidePersonsModal: true,
-                                          embedded: true,
-                                      },
-                                      insightProps: createInsightProps(TileId.GEOGRAPHY, GeographyTab.MAP),
-                                      canOpenInsight: true,
-                                  },
-                                  createTableTab(
-                                      TileId.GEOGRAPHY,
-                                      GeographyTab.COUNTRIES,
-                                      'Countries',
-                                      'Countries',
-                                      WebStatsBreakdown.Country
-                                  ),
-                                  createTableTab(
-                                      TileId.GEOGRAPHY,
-                                      GeographyTab.REGIONS,
-                                      'Regions',
-                                      'Regions',
-                                      WebStatsBreakdown.Region
-                                  ),
-                                  createTableTab(
-                                      TileId.GEOGRAPHY,
-                                      GeographyTab.CITIES,
-                                      'Cities',
-                                      'Cities',
-                                      WebStatsBreakdown.City
-                                  ),
-                                  createTableTab(
-                                      TileId.GEOGRAPHY,
-                                      GeographyTab.TIMEZONES,
-                                      'Timezones',
-                                      'Timezones',
-                                      WebStatsBreakdown.Timezone
-                                  ),
-                                  createTableTab(
-                                      TileId.GEOGRAPHY,
-                                      GeographyTab.LANGUAGES,
-                                      'Languages',
-                                      'Languages',
-                                      WebStatsBreakdown.Language
-                                  ),
-                              ],
-                          }
-                        : null,
+                                          insightProps: createInsightProps(TileId.GEOGRAPHY, GeographyTab.MAP),
+                                          canOpenInsight: true,
+                                      }
+                                    : null,
+                                shouldShowGeoIPQueries
+                                    ? createTableTab(
+                                          TileId.GEOGRAPHY,
+                                          GeographyTab.COUNTRIES,
+                                          'Countries',
+                                          'Countries',
+                                          WebStatsBreakdown.Country
+                                      )
+                                    : null,
+                                shouldShowGeoIPQueries
+                                    ? createTableTab(
+                                          TileId.GEOGRAPHY,
+                                          GeographyTab.REGIONS,
+                                          'Regions',
+                                          'Regions',
+                                          WebStatsBreakdown.Region
+                                      )
+                                    : null,
+                                shouldShowGeoIPQueries
+                                    ? createTableTab(
+                                          TileId.GEOGRAPHY,
+                                          GeographyTab.CITIES,
+                                          'Cities',
+                                          'Cities',
+                                          WebStatsBreakdown.City
+                                      )
+                                    : null,
+                                createTableTab(
+                                    TileId.GEOGRAPHY,
+                                    GeographyTab.LANGUAGES,
+                                    'Languages',
+                                    'Languages',
+                                    WebStatsBreakdown.Language
+                                ),
+                                createTableTab(
+                                    TileId.GEOGRAPHY,
+                                    GeographyTab.TIMEZONES,
+                                    'Timezones',
+                                    'Timezones',
+                                    WebStatsBreakdown.Timezone
+                                ),
+                            ] as (TabsTileTab | null)[]
+                        ).filter(isNotNil),
+                    },
                     !conversionGoal
                         ? {
                               kind: 'query',
@@ -1844,6 +1972,131 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                                       </>
                                   ),
                               },
+                          }
+                        : null,
+                    featureFlags[FEATURE_FLAGS.ACTIVE_HOURS_HEATMAP]
+                        ? {
+                              kind: 'tabs',
+                              tileId: TileId.ACTIVE_HOURS,
+                              layout: {
+                                  colSpanClassName: 'md:col-span-full',
+                              },
+                              activeTabId: activeHoursTab,
+                              setTabId: actions.setActiveHoursTab,
+                              tabs: [
+                                  {
+                                      id: ActiveHoursTab.UNIQUE,
+                                      title: 'Active Hours',
+                                      linkText: 'Unique users',
+                                      canOpenModal: true,
+                                      query: {
+                                          kind: NodeKind.CalendarHeatmapQuery,
+                                          series: [
+                                              {
+                                                  kind: NodeKind.EventsNode,
+                                                  event: '$pageview',
+                                                  name: '$pageview',
+                                                  math: BaseMathType.UniqueUsers,
+                                                  properties: webAnalyticsFilters,
+                                              },
+                                          ],
+                                          dateRange,
+                                          conversionGoal,
+                                      },
+                                      docs: {
+                                          url: 'https://posthog.com/docs/web-analytics/dashboard#active-hours',
+                                          title: 'Active hours - Unique users',
+                                          description: (
+                                              <>
+                                                  <div>
+                                                      <p>
+                                                          Active hours displays a heatmap showing the number of unique
+                                                          users who performed any pageview event, broken down by hour of
+                                                          the day and day of the week.
+                                                      </p>
+                                                      <p>
+                                                          Each cell represents the number of unique users during a
+                                                          specific hour of a specific day. The "All" column aggregates
+                                                          totals for each day, and the bottom row aggregates totals for
+                                                          each hour. The bottom-right cell shows the grand total. The
+                                                          displayed time is based on your project's date and time
+                                                          settings (UTC by default, configurable in{' '}
+                                                          <Link to={urls.settings('project', 'date-and-time')}>
+                                                              project settings
+                                                          </Link>
+                                                          ).
+                                                      </p>
+                                                      <p>
+                                                          <strong>Note:</strong> Selecting a time range longer than 7
+                                                          days will include additional occurrences of weekdays and
+                                                          hours, potentially increasing the user counts in those
+                                                          buckets. For best results, select 7 closed days or multiple of
+                                                          7 closed day ranges.
+                                                      </p>
+                                                  </div>
+                                              </>
+                                          ),
+                                      },
+                                      insightProps: createInsightProps(TileId.ACTIVE_HOURS, ActiveHoursTab.UNIQUE),
+                                  },
+                                  {
+                                      id: ActiveHoursTab.TOTAL_EVENTS,
+                                      title: 'Active Hours',
+                                      linkText: 'Total pageviews',
+                                      canOpenModal: true,
+                                      query: {
+                                          kind: NodeKind.CalendarHeatmapQuery,
+                                          series: [
+                                              {
+                                                  kind: NodeKind.EventsNode,
+                                                  event: '$pageview',
+                                                  name: '$pageview',
+                                                  math: BaseMathType.TotalCount,
+                                                  properties: webAnalyticsFilters,
+                                              },
+                                          ],
+                                          dateRange,
+                                          conversionGoal,
+                                      },
+                                      docs: {
+                                          url: 'https://posthog.com/docs/web-analytics/dashboard#active-hours',
+                                          title: 'Active hours - Total pageviews',
+                                          description: (
+                                              <>
+                                                  <div>
+                                                      <p>
+                                                          Active hours displays a heatmap showing the total number of
+                                                          pageviews, broken down by hour of the day and day of the week.
+                                                      </p>
+                                                      <p>
+                                                          Each cell represents the number of total pageviews during a
+                                                          specific hour of a specific day. The "All" column aggregates
+                                                          totals for each day, and the bottom row aggregates totals for
+                                                          each hour. The bottom-right cell shows the grand total. The
+                                                          displayed time is based on your project's date and time
+                                                          settings (UTC by default, configurable in{' '}
+                                                          <Link to={urls.settings('project', 'date-and-time')}>
+                                                              project settings
+                                                          </Link>
+                                                          ).
+                                                      </p>
+                                                      <p>
+                                                          <strong>Note:</strong> Selecting a time range longer than 7
+                                                          days will include additional occurrences of weekdays and
+                                                          hours, potentially increasing the user counts in those
+                                                          buckets. For best results, select 7 closed days or multiple of
+                                                          7 closed day ranges.
+                                                      </p>
+                                                  </div>
+                                              </>
+                                          ),
+                                      },
+                                      insightProps: createInsightProps(
+                                          TileId.ACTIVE_HOURS,
+                                          ActiveHoursTab.TOTAL_EVENTS
+                                      ),
+                                  },
+                              ],
                           }
                         : null,
                     // Hiding if conversionGoal is set already because values aren't representative
@@ -1910,7 +2163,7 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                               },
                           }
                         : null,
-                    !conversionGoal && featureFlags[FEATURE_FLAGS.ERROR_TRACKING]
+                    !conversionGoal
                         ? {
                               kind: 'error_tracking',
                               tileId: TileId.ERROR_TRACKING,
@@ -1946,77 +2199,79 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                               },
                           }
                         : null,
+                    !conversionGoal && featureFlags[FEATURE_FLAGS.WEB_ANALYTICS_FRUSTRATING_PAGES_TILE]
+                        ? {
+                              kind: 'query',
+                              title: 'Frustrating Pages',
+                              tileId: TileId.FRUSTRATING_PAGES,
+                              layout: {
+                                  colSpanClassName: 'md:col-span-2',
+                              },
+                              query: {
+                                  full: true,
+                                  kind: NodeKind.DataTableNode,
+                                  source: {
+                                      kind: NodeKind.WebStatsTableQuery,
+                                      breakdownBy: WebStatsBreakdown.FrustrationMetrics,
+                                      dateRange,
+                                      filterTestAccounts,
+                                      properties: webAnalyticsFilters,
+                                      compareFilter,
+                                      limit: 10,
+                                      doPathCleaning: isPathCleaningEnabled,
+                                  },
+                                  embedded: true,
+                                  showActions: true,
+                                  hiddenColumns: ['views'],
+                              },
+                              insightProps: createInsightProps(TileId.FRUSTRATING_PAGES, 'table'),
+                              canOpenModal: true,
+                              canOpenInsight: false,
+                              docs: {
+                                  title: 'Frustrating Pages',
+                                  description: (
+                                      <>
+                                          <div>
+                                              <p>
+                                                  See which pages are causing frustration by monitoring rage clicks,
+                                                  dead clicks, and errors.
+                                              </p>
+                                              <p>
+                                                  <ul>
+                                                      <li>
+                                                          A dead click is a click that doesn't result in any action.
+                                                          E.g. an image that looks like a button.
+                                                      </li>
+                                                      <li>
+                                                          Rageclicks are collected when a user clicks on a static
+                                                          element more than three times in a one-second window.
+                                                      </li>
+                                                      <li>
+                                                          Errors are JavaScript exceptions that occur when users
+                                                          interact with your site.
+                                                      </li>
+                                                  </ul>
+                                              </p>
+                                              <p>
+                                                  These are captured automatically and can help identify broken
+                                                  functionality, failed API calls, or other technical issues that
+                                                  frustrate users.
+                                              </p>
+                                          </div>
+                                      </>
+                                  ),
+                              },
+                          }
+                        : null,
                 ]
-                return allTiles.filter(isNotNil)
+                return allTiles
+                    .filter(isNotNil)
+                    .filter((tile) =>
+                        preAggregatedEnabled ? TILES_ALLOWED_ON_PRE_AGGREGATED.includes(tile.tileId) : true
+                    )
             },
         ],
-        modal: [
-            (s) => [s.tiles, s._modalTileAndTab],
-            (tiles, modalTileAndTab): WebAnalyticsModalQuery | null => {
-                if (!modalTileAndTab) {
-                    return null
-                }
-                const { tileId, tabId } = modalTileAndTab
-                const tile: WebAnalyticsTile | undefined = tiles.find((tile) => tile.tileId === tileId)
-                if (!tile) {
-                    return null
-                }
 
-                const extendQuery = (query: QuerySchema): QuerySchema => {
-                    if (
-                        query.kind === NodeKind.DataTableNode &&
-                        (query.source.kind === NodeKind.WebStatsTableQuery ||
-                            query.source.kind === NodeKind.WebExternalClicksTableQuery ||
-                            query.source.kind === NodeKind.WebGoalsQuery)
-                    ) {
-                        return {
-                            ...query,
-                            source: {
-                                ...query.source,
-                                limit: 50,
-                            },
-                        }
-                    }
-                    return query
-                }
-
-                if (tile.kind === 'tabs') {
-                    const tab = tile.tabs.find((tab) => tab.id === tabId)
-                    if (!tab) {
-                        return null
-                    }
-                    return {
-                        tileId,
-                        tabId,
-                        title: tab.title,
-                        showIntervalSelect: tab.showIntervalSelect,
-                        control: tab.control,
-                        insightProps: {
-                            dashboardItemId: getDashboardItemId(tileId, tabId, true),
-                            loadPriority: 0,
-                            doNotLoad: false,
-                            dataNodeCollectionId: WEB_ANALYTICS_DATA_COLLECTION_NODE_ID,
-                        },
-                        query: extendQuery(tab.query),
-                        canOpenInsight: tab.canOpenInsight,
-                    }
-                } else if (tile.kind === 'query') {
-                    return {
-                        tileId,
-                        title: tile.title,
-                        showIntervalSelect: tile.showIntervalSelect,
-                        control: tile.control,
-                        insightProps: {
-                            dashboardItemId: getDashboardItemId(tileId, undefined, true),
-                            loadPriority: 0,
-                            dataNodeCollectionId: WEB_ANALYTICS_DATA_COLLECTION_NODE_ID,
-                        },
-                        query: extendQuery(tile.query),
-                    }
-                }
-                return null
-            },
-        ],
         hasCountryFilter: [
             (s) => [s.webAnalyticsFilters],
             (webAnalyticsFilters: WebAnalyticsPropertyFilters) => {
@@ -2130,40 +2385,7 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                 embedded: false,
             }),
         ],
-        getNewInsightUrl: [
-            (s) => [s.tiles],
-            (tiles) => {
-                return function getNewInsightUrl(tileId: TileId, tabId?: string): string | undefined {
-                    const formatQueryForNewInsight = (query: QuerySchema): QuerySchema => {
-                        if (query.kind === NodeKind.InsightVizNode) {
-                            return {
-                                ...query,
-                                embedded: undefined,
-                                hidePersonsModal: undefined,
-                            }
-                        }
-                        return query
-                    }
-
-                    const tile: WebAnalyticsTile | undefined = tiles.find((tile) => tile.tileId === tileId)
-                    if (!tile) {
-                        return undefined
-                    }
-
-                    if (tile.kind === 'tabs') {
-                        const tab = tile.tabs.find((tab) => tab.id === tabId)
-                        if (!tab) {
-                            return undefined
-                        }
-                        return urls.insightNew({ query: formatQueryForNewInsight(tab.query) })
-                    } else if (tile.kind === 'query') {
-                        return urls.insightNew({ query: formatQueryForNewInsight(tile.query) })
-                    } else if (tile.kind === 'replay') {
-                        return urls.replay()
-                    }
-                }
-            },
-        ],
+        getNewInsightUrl: [(s) => [s.tiles], (tiles: WebAnalyticsTile[]) => getNewInsightUrlFactory(tiles)],
         authorizedDomains: [
             (s) => [s.authorizedUrls],
             (authorizedUrls) => {
@@ -2193,6 +2415,22 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                     const preferredUrl = urls.find((url) => url.protocol === 'https:') ?? urls[0]
                     return preferredUrl.origin
                 })
+            },
+        ],
+        campaignCostsBreakdown: [
+            (s) => [s.loading, s.createDynamicCampaignQuery],
+            (loading: boolean, createDynamicCampaignQuery: string | null): DataTableNode | null => {
+                if (!createDynamicCampaignQuery || loading) {
+                    return null
+                }
+
+                return {
+                    kind: NodeKind.DataTableNode,
+                    source: {
+                        kind: NodeKind.HogQLQuery,
+                        query: createDynamicCampaignQuery,
+                    },
+                }
             },
         ],
     })),
@@ -2257,9 +2495,9 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                 }
             },
         },
-        shouldShowGeographyTile: {
+        shouldShowGeoIPQueries: {
             _default: null as boolean | null,
-            loadShouldShowGeographyTile: async (): Promise<boolean> => {
+            loadShouldShowGeoIPQueries: async (): Promise<boolean> => {
                 // Always display on dev mode, we don't always have events and/or hogQL functions
                 // but we want the map to be there for debugging purposes
                 if (values.isDev) {
@@ -2303,7 +2541,7 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
     // start the loaders after mounting the logic
     afterMount(({ actions }) => {
         actions.loadStatusCheck()
-        actions.loadShouldShowGeographyTile()
+        actions.loadShouldShowGeoIPQueries()
     }),
     windowValues({
         isGreaterThanMd: (window: Window) => window.innerWidth > 768,
@@ -2344,6 +2582,9 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                 } else {
                     urlParams.set('conversionGoal.customEventName', conversionGoal.customEventName)
                 }
+            } else {
+                urlParams.delete('conversionGoal.actionId')
+                urlParams.delete('conversionGoal.customEventName')
             }
             if (dateFrom !== INITIAL_DATE_FROM || dateTo !== INITIAL_DATE_TO || interval !== INITIAL_INTERVAL) {
                 urlParams.set('date_from', dateFrom ?? '')
@@ -2373,6 +2614,8 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
             }
             if (compareFilter) {
                 urlParams.set('compare_filter', JSON.stringify(compareFilter))
+            } else {
+                urlParams.delete('compare_filter')
             }
 
             const { featureFlags } = featureFlagLogic.values
@@ -2386,6 +2629,8 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
             }
             if (deviceTypeFilter) {
                 urlParams.set('device_type', deviceTypeFilter)
+            } else {
+                urlParams.delete('device_type')
             }
             if (tileVisualizations) {
                 urlParams.set('tile_visualizations', JSON.stringify(tileVisualizations))
@@ -2396,6 +2641,8 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                 basePath = '/web/page-reports'
             } else if (productTab === ProductTab.WEB_VITALS) {
                 basePath = '/web/web-vitals'
+            } else if (productTab === ProductTab.MARKETING) {
+                basePath = '/web/marketing'
             }
             return `${basePath}${urlParams.toString() ? '?' + urlParams.toString() : ''}`
         }
@@ -2411,6 +2658,7 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
             setGraphsTab: stateToUrl,
             setPathTab: stateToUrl,
             setGeographyTab: stateToUrl,
+            setActiveHoursTab: stateToUrl,
             setCompareFilter: stateToUrl,
             setProductTab: stateToUrl,
             setWebVitalsPercentile: stateToUrl,
@@ -2436,6 +2684,7 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                 graphs_tab,
                 path_tab,
                 geography_tab,
+                active_hours_tab,
                 path_cleaning,
                 filter_test_accounts,
                 compare_filter,
@@ -2453,12 +2702,15 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
                 productTab = ProductTab.ANALYTICS
             }
 
-            if (![ProductTab.ANALYTICS, ProductTab.WEB_VITALS, ProductTab.PAGE_REPORTS].includes(productTab)) {
+            if (
+                ![ProductTab.ANALYTICS, ProductTab.WEB_VITALS, ProductTab.PAGE_REPORTS, ProductTab.MARKETING].includes(
+                    productTab
+                )
+            ) {
                 return
             }
 
-            const parsedFilters = isWebAnalyticsPropertyFilters(filters) ? filters : undefined
-
+            const parsedFilters = filters ? (isWebAnalyticsPropertyFilters(filters) ? filters : []) : undefined
             if (parsedFilters && !objectsEqual(parsedFilters, values.webAnalyticsFilters)) {
                 actions.setWebAnalyticsFilters(parsedFilters)
             }
@@ -2494,6 +2746,9 @@ export const webAnalyticsLogic = kea<webAnalyticsLogicType>([
             }
             if (geography_tab && geography_tab !== values._geographyTab) {
                 actions.setGeographyTab(geography_tab)
+            }
+            if (active_hours_tab && active_hours_tab !== values._activeHoursTab) {
+                actions.setActiveHoursTab(active_hours_tab)
             }
             if (path_cleaning && path_cleaning !== values.isPathCleaningEnabled) {
                 actions.setIsPathCleaningEnabled([true, 'true', 1, '1'].includes(path_cleaning))
@@ -2587,7 +2842,7 @@ const checkCustomEventConversionGoalHasSessionIdsHelper = async (
     // check if we have any conversion events from the last week without sessions ids
 
     const response = await hogqlQuery(
-        `select count() from events where timestamp >= (now() - toIntervalHour(24)) AND ($session_id IS NULL OR $session_id = '') AND event = {event}`,
+        hogql`select count() from events where timestamp >= (now() - toIntervalHour(24)) AND ($session_id IS NULL OR $session_id = '') AND event = {event}`,
         { event: customEventName }
     )
     breakpoint?.()

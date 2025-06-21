@@ -99,9 +99,11 @@ class TestQueryRunner(BaseTest):
                 "optimizeJoinedFilters": False,
                 "personsOnEventsMode": PersonsOnEventsMode.PERSON_ID_OVERRIDE_PROPERTIES_JOINED,
                 "bounceRatePageViewMode": "count_pageviews",
+                "convertToProjectTimezone": True,
                 "sessionTableVersion": "auto",
                 "useMaterializedViews": True,
                 "sessionsV2JoinMode": "string",
+                "usePresortedEventsTable": False,
             },
             "limit_context": "query",
             "query": {"kind": "TestQuery", "some_attr": "bla"},
@@ -119,7 +121,7 @@ class TestQueryRunner(BaseTest):
         runner = TestQueryRunner(query={"some_attr": "bla"}, team=team)
 
         cache_key = runner.get_cache_key()
-        assert cache_key == "cache_4af8b47e9a002e3cf4cb432187156164"
+        assert cache_key == "cache_81cddfbbf27c8656cc0c71e17917c8bd"
 
     def test_cache_key_runner_subclass(self):
         TestQueryRunner = self.setup_test_query_runner_class()
@@ -133,7 +135,7 @@ class TestQueryRunner(BaseTest):
         runner = TestSubclassQueryRunner(query={"some_attr": "bla"}, team=team)
 
         cache_key = runner.get_cache_key()
-        assert cache_key == "cache_f0690d85f58a85dc826d2de0ed54cb98"
+        assert cache_key == "cache_ac85f6f0bfcc738665881287b9d86890"
 
     def test_cache_key_different_timezone(self):
         TestQueryRunner = self.setup_test_query_runner_class()
@@ -144,7 +146,7 @@ class TestQueryRunner(BaseTest):
         runner = TestQueryRunner(query={"some_attr": "bla"}, team=team)
 
         cache_key = runner.get_cache_key()
-        assert cache_key == "cache_dd77440b7e98b22903d267d281605527"
+        assert cache_key == "cache_2c629e23e4015d311ade6565dcdf0387"
 
     @mock.patch("django.db.transaction.on_commit")
     def test_cache_response(self, mock_on_commit):
